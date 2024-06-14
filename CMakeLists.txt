@@ -11,8 +11,11 @@ include_directories(include)
 # o3 native
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
 
-# 示例程序
-add_executable(example examples/example.cpp)
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+    add_executable(example examples/example.cpp)
+endif()
 
-# 安装规则
-install(DIRECTORY include/Kitokarosu DESTINATION include)
+add_library(Kitokarosu INTERFACE)
+target_include_directories(Kitokarosu INTERFACE 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
