@@ -1,0 +1,33 @@
+# Compiled object files
+*.o
+*.obj
+
+# Compiled dynamic libraries
+*.so
+*.dylib
+
+# Compiled executables
+*.exe
+*.out
+
+# Build directories
+build/
+bin/
+
+# IDE specific files
+.vscode/
+.idea/
+
+# Dependency directories
+lib/
+vendor/
+
+# Miscellaneous
+.DS_Store
+Thumbs.db
+
+# .cache
+.cache/
+
+# .clang-format
+.clang-format
