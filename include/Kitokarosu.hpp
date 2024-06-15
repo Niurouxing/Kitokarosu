@@ -215,6 +215,14 @@ public:
         std::transform(RxSymbols.begin(), RxSymbols.end(), RxSymbols.begin(), [this](auto x) { return x + normal_distribution<0, 1>() * sqrtNvDiv2; });
     }
 
+    inline void generate()
+    {
+        generateTxIndices();
+        generateTxSymbols();
+        generateH();
+        generateRxSymbols();
+    }
+
     template <typename T>
         requires std::is_same_v<T, float> || std::is_same_v<T, double>
     inline auto judge(std::array<T, 2 * TxAntNum> &symbolsEst)
