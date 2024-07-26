@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 include_directories(include)
 
 # o3 native
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     add_executable(example examples/example.cpp)

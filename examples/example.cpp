@@ -1,4 +1,4 @@
-#include <Kitokarosu/Kitokarosu.hpp>
+#include <Kitokarosu.hpp>
 
 using namespace Kito;
 
@@ -21,34 +21,37 @@ int main()
 
  
 
-    std::cout << "TxIndices: ";
-    for (auto i : det.TxIndices)
-        std::cout << i << " ";
-    std::cout << std::endl;
+    // std::cout << "TxIndices: ";
+    // for (auto i : det.TxIndices)
+    //     std::cout << i << " ";
+    // std::cout << std::endl;
 
-    std::cout << "TxSymbols: ";
-    for (auto i : det.TxSymbols)
-        std::cout << i << " ";
-    std::cout << std::endl;
+    // std::cout << "TxSymbols: ";
+    // for (auto i : det.TxSymbols)
+    //     std::cout << i << " ";
+    // std::cout << std::endl;
 
-    std::cout << "H: " << std::endl;
-    for (size_t i = 0; i < 2 * det.RxAntNum; i++)
-    {
-        for (size_t j = 0; j < 2 * det.TxAntNum; j++)
-        {
-            std::cout << det.H_span[i, j] << " ";
-        }
-        std::cout << std::endl;
-    }
+    // std::cout << "H: " << std::endl;
+    // for (size_t i = 0; i < 2 * det.RxAntNum; i++)
+    // {
+    //     for (size_t j = 0; j < 2 * det.TxAntNum; j++)
+    //     {
+    //         std::cout << det.H[i, j] << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
 
-    std::cout << "RxSymbols: ";
-    for (auto i : det.RxSymbols)
-        std::cout << i << " ";
-    std::cout << std::endl;
+    // std::cout << "RxSymbols: ";
+    // for (auto i : det.RxSymbols)
+    //     std::cout << i << " ";
+    // std::cout << std::endl;
 
-    auto symbolsEst = det.TxSymbols;
+    det.TxIndices.print("TxIndices");
+    det.TxSymbols.print("TxSymbols");
+    det.H.print("H");
+    det.RxSymbols.print("RxSymbols");
 
-
+ 
 
 
 }
