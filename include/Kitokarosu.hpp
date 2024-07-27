@@ -265,7 +265,7 @@ public:
         return os;
     }
 
-    void print(std::string name = "")
+    void print(std::string name = "") const
     {
         if (name != "")
         {
