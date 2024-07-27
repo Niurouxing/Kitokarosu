@@ -13,7 +13,8 @@
 inline namespace Kito {
 
 // 初始化随机数生成器
-inline static std::mt19937 gen(std::random_device{}());
+// inline static std::mt19937 gen(std::random_device{}());
+inline static std::mt19937 gen(0);
 
 // 均匀分布整数
 template <int min, int max>
@@ -110,6 +111,45 @@ public:
     constexpr Tensor() = default;
     constexpr Tensor(auto... vals) : data{static_cast<PrecInput>(vals)...} {}
 
+    // 拷贝构造函数
+    Tensor(const Tensor& other)
+        : data(other.data) {}
+
+    // 移动构造函数
+    Tensor(Tensor&& other) noexcept
+        : data(std::move(other.data)) {}
+
+    // 模板化拷贝构造函数从不同类型的Tensor构造
+    template<typename OtherPrecInput>
+    Tensor(const Tensor<OtherPrecInput, dimsInput...>& other) {
+        std::transform(other.data.begin(), other.data.end(), data.begin(), 
+                       [](auto&& x) { return static_cast<PrecInput>(x); });
+    }
+
+    // 赋值操作符
+    Tensor& operator=(const Tensor& other) {
+        if (this != &other) {
+            data = other.data;
+        }
+        return *this;
+    }
+
+    // 移动赋值操作符
+    Tensor& operator=(Tensor&& other) noexcept {
+        if (this != &other) {
+            data = std::move(other.data);
+        }
+        return *this;
+    }
+
+    // 模板化赋值操作符从不同类型的Tensor赋值
+    template<typename OtherPrecInput>
+    Tensor& operator=(const Tensor<OtherPrecInput, dimsInput...>& other) {
+        std::transform(other.data.begin(), other.data.end(), data.begin(), 
+                       [](auto&& x) { return static_cast<PrecInput>(x); });
+        return *this;
+    }
+
     // if from a l-value std::array, copy the data
     template <size_t N, typename T>
     Tensor(const std::array<T, N> &arr)
@@ -142,6 +182,44 @@ public:
             std::transform(arr.begin(), arr.end(), data.begin(),
                            [](auto x) { return static_cast<PrecInput>(x); });
         }
+    }
+
+    // operator= for std::array
+    template <size_t N, typename T>
+    Tensor &operator=(const std::array<T, N> &arr)
+    {
+        static_assert(N == size, "Size of array must match the size of tensor");
+
+        if constexpr (std::is_same_v<PrecInput, T>)
+        {
+            std::copy(arr.begin(), arr.end(), data.begin());
+        }
+        else
+        {
+            std::transform(arr.begin(), arr.end(), data.begin(),
+                           [](auto x) { return static_cast<PrecInput>(x); });
+        }
+
+        return *this;
+    }
+
+    // operator= for std::array
+    template <size_t N, typename T>
+    Tensor &operator=(std::array<T, N> &&arr)
+    {
+        static_assert(N == size, "Size of array must match the size of tensor");
+
+        if constexpr (std::is_same_v<PrecInput, T>)
+        {
+            std::move(arr.begin(), arr.end(), data.begin());
+        }
+        else
+        {
+            std::transform(arr.begin(), arr.end(), data.begin(),
+                           [](auto x) { return static_cast<PrecInput>(x); });
+        }
+
+        return *this;
     }
 
     // [] operator
