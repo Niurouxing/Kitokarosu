@@ -237,10 +237,14 @@ public:
                 for (size_t j = 0; j < col; j++)
                 {
                     os << std::setw(max_width) << std::right
-                       << formatted_elements[i * col + j];
+                       << formatted_elements[i + j * row];
                     if (j != col - 1)
                     {
                         os << ", ";
+                    }
+                    else {
+                        os << ";";
+                    
                     }
                 }
             }

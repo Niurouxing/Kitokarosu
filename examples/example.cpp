@@ -20,38 +20,8 @@ int main()
     det.generateRxSymbols();
 
  
-
-    // std::cout << "TxIndices: ";
-    // for (auto i : det.TxIndices)
-    //     std::cout << i << " ";
-    // std::cout << std::endl;
-
-    // std::cout << "TxSymbols: ";
-    // for (auto i : det.TxSymbols)
-    //     std::cout << i << " ";
-    // std::cout << std::endl;
-
-    // std::cout << "H: " << std::endl;
-    // for (size_t i = 0; i < 2 * det.RxAntNum; i++)
-    // {
-    //     for (size_t j = 0; j < 2 * det.TxAntNum; j++)
-    //     {
-    //         std::cout << det.H[i, j] << " ";
-    //     }
-    //     std::cout << std::endl;
-    // }
-
-    // std::cout << "RxSymbols: ";
-    // for (auto i : det.RxSymbols)
-    //     std::cout << i << " ";
-    // std::cout << std::endl;
-
-    det.TxIndices.print("TxIndices");
-    det.TxSymbols.print("TxSymbols");
-    det.H.print("H");
-    det.RxSymbols.print("RxSymbols");
-
- 
+    Tensor<double,2,2> z = {1,2,3,4};
+    z.print();
 
 
 }
