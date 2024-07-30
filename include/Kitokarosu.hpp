@@ -112,41 +112,47 @@ public:
     constexpr Tensor(auto... vals) : data{static_cast<PrecInput>(vals)...} {}
 
     // 拷贝构造函数
-    Tensor(const Tensor& other)
+    Tensor(const Tensor &other)
         : data(other.data) {}
 
     // 移动构造函数
-    Tensor(Tensor&& other) noexcept
+    Tensor(Tensor &&other) noexcept
         : data(std::move(other.data)) {}
 
     // 模板化拷贝构造函数从不同类型的Tensor构造
-    template<typename OtherPrecInput>
-    Tensor(const Tensor<OtherPrecInput, dimsInput...>& other) {
-        std::transform(other.data.begin(), other.data.end(), data.begin(), 
-                       [](auto&& x) { return static_cast<PrecInput>(x); });
+    template <typename OtherPrecInput>
+    Tensor(const Tensor<OtherPrecInput, dimsInput...> &other)
+    {
+        std::transform(other.data.begin(), other.data.end(), data.begin(),
+                       [](auto &&x) { return static_cast<PrecInput>(x); });
     }
 
     // 赋值操作符
-    Tensor& operator=(const Tensor& other) {
-        if (this != &other) {
+    Tensor &operator=(const Tensor &other)
+    {
+        if (this != &other)
+        {
             data = other.data;
         }
         return *this;
     }
 
     // 移动赋值操作符
-    Tensor& operator=(Tensor&& other) noexcept {
-        if (this != &other) {
+    Tensor &operator=(Tensor &&other) noexcept
+    {
+        if (this != &other)
+        {
             data = std::move(other.data);
         }
         return *this;
     }
 
     // 模板化赋值操作符从不同类型的Tensor赋值
-    template<typename OtherPrecInput>
-    Tensor& operator=(const Tensor<OtherPrecInput, dimsInput...>& other) {
-        std::transform(other.data.begin(), other.data.end(), data.begin(), 
-                       [](auto&& x) { return static_cast<PrecInput>(x); });
+    template <typename OtherPrecInput>
+    Tensor &operator=(const Tensor<OtherPrecInput, dimsInput...> &other)
+    {
+        std::transform(other.data.begin(), other.data.end(), data.begin(),
+                       [](auto &&x) { return static_cast<PrecInput>(x); });
         return *this;
     }
 
@@ -301,9 +307,10 @@ public:
         os << std::fixed << std::setprecision(max_decimal);
 
         // 输出
-        os << "[";
+
         if constexpr (Tensor ::dims == 2)
         {
+            os << "[";
             auto [row, col] = Tensor ::shape;
             for (size_t i = 0; i < row; i++)
             {
@@ -320,15 +327,62 @@ public:
                     {
                         os << ", ";
                     }
-                    else {
+                    else
+                    {
                         os << ";";
-                    
                     }
                 }
             }
+            os << "]";
+        }
+        else if (Tensor ::dims == 3)
+        {
+            // 3D tensor
+            size_t dim1 = Tensor ::shape[0];
+            size_t dim2 = Tensor ::shape[1];
+            size_t dim3 = Tensor ::shape[2];
+
+            for (size_t i = 0; i < dim1; i++)
+            {
+                std::cout<<"[" << i << " , " <<" : " << "," << " : " << "]" << std::endl;
+                
+                os << "[";
+                // matrix format cout
+                for (size_t j = 0; j < dim2; j++)
+                {
+                    if (j != 0)
+                    {
+                        os << std::endl
+                           << " ";
+                    }
+                    for (size_t k = 0; k < dim3; k++)
+                    {
+                        os << std::setw(max_width) << std::right
+                           << formatted_elements[i + j * dim1 + k * dim1 * dim2];
+                        if (k != dim3 - 1)
+                        {
+                            os << ", ";
+                        }
+                        else
+                        {
+                            os << ";";
+                        }
+                    }
+                }
+                os << "]";
+
+                if (i != dim1 - 1)
+                {
+                    os << std::endl;
+                }
+                    
+
+            }
+ 
         }
         else
         {
+            os << "[";
             for (size_t i = 0; i < val.size; i++)
             {
                 os << std::setw(max_width) << std::right << formatted_elements[i];
@@ -337,8 +391,8 @@ public:
                     os << ", ";
                 }
             }
+            os << "]";
         }
-        os << "]";
 
         // 恢复原始格式状态
         os.flags(original_flags);
@@ -545,9 +599,10 @@ public:
     {
         static std::array<size_t, 2 * TxAntNum> wrongBits;
 
-        std::transform(bitsEst.begin(), bitsEst.end(), ModType::bitsRD.begin(),
-                       wrongBits.begin(),
-                       [](int bit, int bitRD) { return bit ^ bitRD; });
+        std::transform(bitsEst.begin(), bitsEst.end(), TxIndices.begin(),
+                       wrongBits.begin(), [](int bits, size_t index) {
+                           return std::bitset<ModType::bitLength>(bits ^ index).count();
+                       });
 
         return std::accumulate(wrongBits.begin(), wrongBits.end(), 0);
     }
