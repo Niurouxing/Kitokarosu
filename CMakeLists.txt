@@ -1,21 +1,31 @@
-cmake_minimum_required(VERSION 3.10)
-project(Kitokarosu VERSION 1.0 DESCRIPTION "Kitokarosu header-only C++ library")
+cmake_minimum_required(VERSION 3.15)
+project(Kitokarosu VERSION 1.0.0 LANGUAGES CXX)
 
-# 设置 C++ 标准
+# 设置C++标准
 set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED True)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 包含目录
-include_directories(include)
+# 添加子模块（Eigen3）
+add_subdirectory(extern/eigen)
 
-# o3 native
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
-
-if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
-    add_executable(example examples/example.cpp)
-endif()
-
+# 创建接口库目标
 add_library(Kitokarosu INTERFACE)
-target_include_directories(Kitokarosu INTERFACE 
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
+
+# 包含目录配置
+target_include_directories(Kitokarosu
+    INTERFACE
+        $<INSTALL_INTERFACE:include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
+
+# 链接依赖项（Eigen3）
+target_link_libraries(Kitokarosu
+    INTERFACE
+        Eigen3::Eigen
+)
+
+# 启用示例（可选）
+option(BUILD_EXAMPLES "Build examples" ON)
+if(BUILD_EXAMPLES)
+    add_subdirectory(examples)
+endif()
