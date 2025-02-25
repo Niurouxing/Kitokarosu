@@ -40,6 +40,7 @@ inline static double normal_distribution()
 
 
 
+
 // ------------------- concept -------------------
 
 template<typename T>
@@ -114,7 +115,7 @@ struct tagExtractor<Tag, Tag2, Args...> : tagExtractor<Tag, Args...>
 
 
 // clang-format off
-inline constexpr uint16_t liftSizeTable[8][8]=
+inline constexpr size_t liftSizeTable[8][8]=
         {   {2, 	4,	8,	16,	32,	64,	128,256},
             {3, 	6,	12,	24,	48,	96,	192,384},
             {5, 	10,	20,	40,	80,	160,320,0  },
@@ -126,7 +127,7 @@ inline constexpr uint16_t liftSizeTable[8][8]=
 
 
 
-inline constexpr uint16_t shiftTableBgn_1 [316][10] =
+inline constexpr size_t shiftTableBgn_1 [316][10] =
         {	{0, 0,   	250,   	307,   	73,   	223,   	211,   	294,   	0,   	135   	},
              {0, 1,   	69,   	19,   	15,   	16,   	198,   	118,   	0,   	227   	},
              {0, 2,   	226,   	50,   	103,   	94,   	188,   	167,   	0,   	126   	},
@@ -444,7 +445,7 @@ inline constexpr uint16_t shiftTableBgn_1 [316][10] =
              {45, 10,   	167,   	15,   	126,   	29,   	144,   	235,   	153,   	93   	},
              {45, 67,   	0,   	0,   	0,   	0,   	0,   	0,   	0,   	0,    	}, };
 
-inline constexpr uint16_t shiftTableBgn_2 [197][10] =
+inline constexpr size_t shiftTableBgn_2 [197][10] =
         {   {	0,	0,   	9,   	174,   	0,   	72,   	3,   	156,   	143,   	145	},
             {	0,	1,   	117,   	97,   	0,   	110,   	26,   	143,   	19,   	131	},
             {	0,	2,   	204,   	166,   	0,   	23,   	53,   	14,   	176,   	71	},
@@ -650,16 +651,16 @@ inline constexpr uint16_t shiftTableBgn_2 [197][10] =
 //  along with the corresponding shift coefficient
 struct edge_t
 {
-    uint16_t cNodeIdx;
-    uint16_t vNodeIdx;
-    uint16_t nShifts;
+    size_t cNodeIdx;
+    size_t vNodeIdx;
+    size_t nShifts;
 };
 
 // a layer includes all the connections(edges) to a check node in a tanner graph
 struct layer_t
 {
-    uint16_t edgeStart;
-    uint16_t edgeEnd;
+    size_t edgeStart;
+    size_t edgeEnd;
 
     void print()
     {
@@ -729,10 +730,10 @@ inline auto checkNodeOperation(const std::array<std::array<double, mZc>, nMaxLay
 
 struct BG1
 {
-    static constexpr inline uint16_t Kb = 22;
-    static constexpr inline uint16_t Cb = 68;
-    static constexpr inline uint16_t TotalEdges = 316;
-    static constexpr inline uint16_t TotalLayers = 46;
+    static constexpr inline size_t Kb = 22;
+    static constexpr inline size_t Cb = 68;
+    static constexpr inline size_t TotalEdges = 316;
+    static constexpr inline size_t TotalLayers = 46;
 
     static constexpr inline size_t mK(auto mZc) { return 22 * mZc; }
 
@@ -745,10 +746,10 @@ struct BG1
 
 struct BG2
 {
-    static constexpr inline uint16_t Kb = 10;
-    static constexpr inline uint16_t Cb = 52;
-    static constexpr inline uint16_t TotalEdges = 197;
-    static constexpr inline uint16_t TotalLayers = 42;
+    static constexpr inline size_t Kb = 10;
+    static constexpr inline size_t Cb = 52;
+    static constexpr inline size_t TotalEdges = 197;
+    static constexpr inline size_t TotalLayers = 42;
 
     static constexpr inline size_t mK(auto mZc) { return 10 * mZc; }
 
@@ -763,9 +764,9 @@ template <size_t KBar, double R>
 using BGSelector = std::conditional_t<(KBar <= 292 || (KBar <= 3824 && R <= 0.67) || R <= 0.25), BG2, BG1>;
 
 template <typename BG, size_t KBar>
-inline static consteval uint16_t selectLiftSize()
+inline static consteval size_t selectLiftSize()
 {
-    uint16_t Kb;
+    size_t Kb;
     if constexpr (std::is_same_v<BG, BG1>)
         Kb = 22;
     else
@@ -780,8 +781,8 @@ inline static consteval uint16_t selectLiftSize()
             Kb = 6;
     }
 
-    uint16_t Zc = 384;
-    uint16_t candiZc;
+    size_t Zc = 384;
+    size_t candiZc;
     for (unsigned i = 0; i < 8; i++)
     {
         for (unsigned j = 0; j < 8; j++)
@@ -822,7 +823,7 @@ struct TannerGenerator<BG1>
         for (unsigned i = 0; i < BG1::TotalEdges; i++)
         {
             edges[i] = {shiftTableBgn_1[i][0], shiftTableBgn_1[i][1],
-                        uint16_t(shiftTableBgn_1[i][mSetIdx + 2] % mZc)};
+                        size_t(shiftTableBgn_1[i][mSetIdx + 2] % mZc)};
         }
 
         return edges;
@@ -846,7 +847,7 @@ struct TannerGenerator<BG2>
         for (unsigned i = 0; i < BG2::TotalEdges; i++)
         {
             edges[i] = {shiftTableBgn_2[i][0], shiftTableBgn_2[i][1],
-                        uint16_t(shiftTableBgn_2[i][mSetIdx + 2] % mZc)};
+                        size_t(shiftTableBgn_2[i][mSetIdx + 2] % mZc)};
         }
 
         return edges;
@@ -868,7 +869,7 @@ public:
     inline static constexpr double mR = codeRate;
 
     using BG = BGSelector<mKBar, mR>;
-    inline static constexpr uint16_t mZc = selectLiftSize<BG, mKBar>();
+    inline static constexpr size_t mZc = selectLiftSize<BG, mKBar>();
     inline static constexpr uint8_t mShiftSet = selectShiftSet<mZc>();
 
     inline static constexpr size_t mK = BG::mK(mZc);
@@ -881,6 +882,8 @@ public:
 
     // fillers length
     inline static constexpr size_t mF = mK - mKBar;
+
+    static_assert(mK > mKBar, "Invalid configuration");
 
     inline static constexpr auto mEdges = TannerGenerator<BG>::generateEdges(mZc, mShiftSet);
     inline static constexpr auto mLayers = TannerGenerator<BG>::generateLayers();
@@ -906,6 +909,7 @@ public:
     // inside codeword storage
     std::array<std::bitset<mZc>, Cb> cWord{}; // bitset format
     std::array<bool, mN> codeword;            // bool format
+    std::array<bool, mKBar> msg;              // bool format
 
     // bitsOut
     std::array<bool, mK> bitsOut;
@@ -922,17 +926,71 @@ public:
     std::array<std::array<double, mZc>, Cb> LLR;
     std::array<bool, mKBar> decBits;
 
+
+
     // function
-    inline auto& encode(const auto &msg)
+
+    inline auto& encode()
     {
-        assert(Kb * mZc == msg.size());
+        constexpr size_t fullZcNum = mKBar / mZc;
+        constexpr size_t lastZcNum = mKBar % mZc;
+
+
+        // uint64_t随机数生成器
+        static std::uniform_int_distribution<uint64_t> uint64_dist;
+
+        // cWord 的前 fullZcNum 个元素随机
+        for (unsigned i = 0; i < fullZcNum; i++)
+        {
+            cWord[i].reset();
+            for (unsigned j = 0; j < mZc; j++)
+            {
+                cWord[i].set(mZc - 1 - j, rand() % 2);
+            }
+             
+        }
+        // 最后一个元素的前 lastZcNum 位随机
+        cWord[fullZcNum].reset();
+        for (unsigned j = 0; j < lastZcNum; j++)
+        {
+            cWord[fullZcNum].set(mZc - 1 - j, rand() % 2);
+        }
+ 
+        // 其余元素清零
+        for (unsigned i = fullZcNum + 1; i < Cb; i++)
+        {
+            cWord[i].reset();
+        }
+
+        // save to msg
+        for (unsigned i = 0; i < Kb; i++)
+        {
+            for (unsigned j = 0; j < mZc; j++)
+            {
+                msg[i * mZc + j] = cWord[i].test(mZc - 1 - j);
+            }
+        }
+
+
+
+        return encodeImpl();
+
+    }
+
+    inline auto& encode(const auto &msgInput)
+    {
+        assert(Kb * mZc == msgInput.size());
+
+        // copy to msg
+        std::copy(msgInput.begin(), msgInput.end(), msg.begin());
+
 
         // 初始化时逐位复制（假设 msg 是连续的 bool 数组）
         for (unsigned i = 0; i < Kb; i++)
         {
             for (unsigned j = 0; j < mZc; j++)
             {
-                cWord[i].set(mZc - 1 - j, msg[i * mZc + j]);
+                cWord[i].set(mZc - 1 - j, msgInput[i * mZc + j]);
             }
         }
 
@@ -942,7 +1000,13 @@ public:
             cWord[i].reset();
         }
 
-        uint16_t vNodeIdx, nShifts, shiftP0;
+        return encodeImpl();
+    }
+
+
+    inline auto& encodeImpl()
+    {
+        size_t vNodeIdx, nShifts, shiftP0;
 
         // 处理前四个层计算 P0
         for (unsigned i = 0; i < 4; i++)
@@ -1037,7 +1101,7 @@ public:
         }
     }
 
-    inline auto& rateRecover(auto &softBitsIn)
+    inline auto& rateRecover(const auto &softBitsIn)
     {
         // for received bits longer than the ring
         rxBufferRing.fill(0.0);
@@ -1238,7 +1302,7 @@ public:
         }
     }
 
-    void setSNR(double SNRdB)
+    void setSNR(const double SNRdB)
     {
         Nv = TxAntNum * RxAntNum /
              (std::pow(10, SNRdB / 10) * ModType::bitLength * TxAntNum);
@@ -1254,27 +1318,34 @@ public:
                        [](size_t index) { return symbolsRD[index]; });
     }
 
-
-    inline void generateTx(auto &bitsInput)
+    template <typename It>
+    requires std::contiguous_iterator<It> && std::same_as<std::iter_value_t<It>, bool>
+    inline void generateTx(const It bitsInput)
     {
-
-        constexpr auto indices = std::views::iota(0u, 2 * TxAntNum);
-        constexpr auto to_int = [](auto&& chunk) {
+        constexpr size_t chunk_size = ModType::bitLength / 2;
+        constexpr size_t num_chunks = 2 * TxAntNum;
+        constexpr size_t total_bits = ModType::bitLength * TxAntNum;
+    
+        std::span<const bool> input_span{bitsInput, total_bits};
+    
+        constexpr auto indices = std::views::iota(0u, num_chunks);
+    
+        constexpr auto to_int = [](std::span<const bool> chunk) {
             int result = 0;
             for (bool b : chunk) {
                 result = (result << 1) | (b ? 1 : 0);
             }
             return result;
         };
-        
-        std::ranges::transform(indices.begin(), indices.end(), TxIndices.begin(),
-                       [&](auto index) {
-                           return to_int(std::span(bitsInput.begin() + index * ModType::bitLength/2, ModType::bitLength/2));
-                       });
-
-
-        std::transform(TxIndices.begin(), TxIndices.end(), TxSymbols.begin(),
-                       [](size_t index) { return symbolsRD[index]; });
+    
+        std::ranges::transform(indices, TxIndices.begin(),
+            [&](auto index) {
+                auto chunk = input_span.subspan(index * chunk_size, chunk_size);
+                return to_int(chunk);
+            });
+    
+        std::ranges::transform(TxIndices.begin(), TxIndices.end(), TxSymbols.begin(),
+            [](size_t index) { return symbolsRD[index]; });
     }
 
     inline void generateH()
@@ -1302,9 +1373,9 @@ public:
         RxSymbols += Eigen::Vector<PrecType, 2 * RxAntNum>::NullaryExpr([&](size_t i) { return normal_distribution<0, 1>() * sqrtNvDiv2; });
     }
 
-    inline void generate()
+    inline void generate(const auto&&... input)
     {
-        generateTx();
+        generateTx(input...);
         generateH();
         generateRx();
     }
