@@ -1459,7 +1459,95 @@ using Detection = typename DetectionInputHelper<Args...>::type;
 
 
 
+template <typename ModType, typename PrecType, size_t TxAntNum, size_t RxAntNum>
+class MMSE {
+public:
+    using MatrixH = Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>;
+    using VectorY = Eigen::Matrix<PrecType, 2 * RxAntNum, 1>;
+    using MatrixW = Eigen::Matrix<PrecType, 2 * TxAntNum, 2 * RxAntNum>;
+    using VectorX = Eigen::Matrix<PrecType, 2 * TxAntNum, 1>;
+    using VectorMu = Eigen::Matrix<PrecType, 2 * TxAntNum, 1>;
+    using VectorSigma = Eigen::Matrix<PrecType, 2 * TxAntNum, 1>;
+    
+    // 中间结果存储
+    MatrixW W;
+    VectorMu mu;
+    VectorSigma sigma_eff_sq;
+    VectorX x_est;
+    VectorX s_norm;
+    Eigen::Matrix<PrecType, Eigen::Dynamic, 1> llr;
 
+    // 星座图相关参数
+    static constexpr size_t bits_per_symbol = ModType::bitLength;
+    static constexpr size_t bits_per_dim = bits_per_symbol / 2;
+    static constexpr auto& symbols = ModType::symbolsRD;
+
+    MMSE(const MatrixH& H, const VectorY& y, PrecType Nv) 
+        : H_(H), y_(y), Nv_(Nv) {
+        calculate_mmse_matrix();
+        estimate_symbols();
+        normalize_symbols();
+    }
+
+    void compute_llr() {
+        const size_t total_bits = 2 * TxAntNum * bits_per_dim;
+        llr.resize(total_bits);
+        
+        for(int i = 0; i < 2 * TxAntNum; ++i) {
+            const PrecType s = s_norm[i];
+            const PrecType inv_sigma_sq = 1.0 / sigma_eff_sq[i];
+            
+            for(int b = 0; b < bits_per_dim; ++b) {
+                PrecType min_dist_0 = std::numeric_limits<PrecType>::max();
+                PrecType min_dist_1 = min_dist_0;
+                
+                for(size_t k = 0; k < symbols.size(); ++k) {
+                    const bool bit = (k >> (bits_per_dim - 1 - b)) & 1;
+                    const PrecType dist = std::pow(s - symbols[k], 2);
+                    
+                    if(bit) {
+                        min_dist_1 = std::min(min_dist_1, dist);
+                    } else {
+                        min_dist_0 = std::min(min_dist_0, dist);
+                    }
+                }
+                
+                llr[i * bits_per_dim + b] = (min_dist_1 - min_dist_0) * inv_sigma_sq;
+            }
+        }
+    }
+
+    // 获取中间结果的接口
+    const VectorX& estimated_symbols() const { return x_est; }
+    const VectorX& normalized_symbols() const { return s_norm; }
+    const Eigen::Matrix<PrecType, Eigen::Dynamic, 1>& get_llr() const { return llr; }
+
+private:
+    MatrixH H_;
+    VectorY y_;
+    PrecType Nv_;
+
+    void calculate_mmse_matrix() {
+        MatrixW HtH = H_.transpose() * H_;
+        W = (HtH + Nv_ * MatrixW::Identity()).inverse() * H_.transpose();
+        mu = (W * H_).diagonal();
+    }
+
+    void estimate_symbols() {
+        x_est = W * y_;
+        
+        // 计算有效噪声方差
+        for(int i = 0; i < 2 * TxAntNum; ++i) {
+            PrecType interference = (W.row(i) * H_).squaredNorm() - mu[i] * mu[i];
+            PrecType noise_amp = W.row(i).squaredNorm();
+            sigma_eff_sq[i] = (0.5 * interference + (Nv_/2) * noise_amp) / (mu[i] * mu[i]);
+        }
+    }
+
+    void normalize_symbols() {
+        s_norm = x_est.array() / mu.array();
+    }
+};
 
 
 
