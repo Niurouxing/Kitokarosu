@@ -1230,6 +1230,7 @@ struct QAM16
     inline static constexpr std::array<Prec, 4> symbolsRD = {
         -0.31622776601683794, -0.9486832980505138, 0.31622776601683794,
         0.9486832980505138};
+    inline static constexpr double Delta = 0.63245553;
 };
 
 template< typename Prec>
@@ -1240,6 +1241,7 @@ struct QAM64
         -0.4629100498862757, -0.1543033499620919, -0.7715167498104595,
         -1.0801234497346432, 0.1543033499620919, 0.4629100498862757,
         0.7715167498104595, 1.0801234497346432};
+        inline static constexpr double Delta = 0.3086067;
 };
 
 template< typename Prec>
@@ -1253,6 +1255,8 @@ struct QAM256
         0.5368754921931592, 0.2300894966542111, 0.07669649888473704,
         0.8436614877321074, 0.6902684899626333, 0.9970544855015815,
         1.1504474832710556};
+
+        inline static constexpr double Delta = 0.153393;
 };
 
 template <typename ModType>
