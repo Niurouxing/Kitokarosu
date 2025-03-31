@@ -1436,10 +1436,10 @@ struct DetectionInputHelper
     static_assert(RxAntNum >= TxAntNum,
                   "RxAntNum must be greater than or equal to TxAntNum");
 
-    static_assert(std::is_same<ModType, QAM16<PrecType>>::value ||
-                      std::is_same<ModType, QAM64<PrecType>>::value ||
-                      std::is_same<ModType, QAM256<PrecType>>::value,
-                  "ModType must be QAM16, QAM64 or QAM256");
+    // static_assert(std::is_same<ModType, QAM16<PrecType>>::value ||
+    //                   std::is_same<ModType, QAM64<PrecType>>::value ||
+    //                   std::is_same<ModType, QAM256<PrecType>>::value,
+    //               "ModType must be QAM16, QAM64 or QAM256");
     static_assert(std::is_same<DomainType, RD>::value ||
                       std::is_same<DomainType, CD>::value,
                   "DomainType must be RD or CD");
@@ -1453,12 +1453,6 @@ struct DetectionInputHelper
 
 template <typename... Args>
 using Detection = typename DetectionInputHelper<Args...>::type;
-
-
-
-
-
-
 
 
 
@@ -1555,30 +1549,157 @@ private:
 };
 
 
+template <size_t K>
+std::vector<size_t> findSmallestKIndices(const auto &arr, size_t N)
+{
+    const size_t valid_N = std::min(N, arr.size());
+    const size_t k = std::min(K, valid_N);
+    if (k == 0)
+    {
+        return {};
+    }
+
+    using value_type = typename std::remove_cvref_t<decltype(arr)>::value_type;
+    std::vector<std::pair<value_type, size_t>> elements_with_index;
+    elements_with_index.reserve(valid_N);
+    for (size_t i = 0; i < valid_N; ++i)
+    {
+        elements_with_index.emplace_back(arr[i], i);
+    }
+
+    auto compare = [](const auto &a, const auto &b) {
+        if (a.first != b.first)
+        {
+            return a.first < b.first;
+        }
+        else
+        {
+            return a.second < b.second;
+        }
+    };
+
+    if (k < valid_N)
+    {
+        std::partial_sort(
+            elements_with_index.begin(),
+            elements_with_index.begin() + k,
+            elements_with_index.end(),
+            compare);
+    }
+    else
+    {
+        std::sort(elements_with_index.begin(), elements_with_index.end(), compare);
+    }
+
+    std::vector<size_t> result;
+    result.reserve(k);
+    for (size_t i = 0; i < k; ++i)
+    {
+        result.push_back(elements_with_index[i].second);
+    }
+
+    return result;
+}
+
+template <typename Detection, size_t K>
+class KBest
+{
+public:
+    // 类型别名
+    using QAM = typename Detection::ModType;
+    using PrecType = typename Detection::PrecType;
+
+    // 矩阵存储
+    Eigen::Matrix<PrecType, 2 * Detection::RxAntNum, 2 * Detection::TxAntNum> Q;
+    Eigen::Matrix<PrecType, 2 * Detection::TxAntNum, 2 * Detection::TxAntNum> R;
+    Eigen::Matrix<PrecType, 2 * Detection::TxAntNum, 1> z;
+
+    void initializeQR(const Detection &det)
+    {
+        // QR分解
+        Eigen::HouseholderQR<decltype(Q)> qr(det.H);
+        Q = qr.householderQ();
+        R = qr.matrixQR().template triangularView<Eigen::Upper>();
+        z = Q.transpose() * det.RxSymbols;
+    }
+
+    auto run(const Detection &det)
+    {
+        initializeQR(det);
+
+        auto& symbols = QAM::symbolsRD;
+        static std::array<PrecType, K * symbols.size()> candidates;
+        static std::array<std::array<PrecType, 2 * Detection::TxAntNum>, K> survivors;
+        static std::array<std::array<PrecType, 2 * Detection::TxAntNum>, K> survivorsCopy;
+        static std::array<PrecType, K> currentSurvivePathPED;
+
+        currentSurvivePathPED.fill(0);
+
+        int currntSurvivePathNum = 1;
+        int currentLayer = 0;
+
+        for (int layer = 0; layer < 2 * Detection::TxAntNum; ++layer)
+        {
+            // 计算当前存活路径的PED
+            for (int i = 0; i < currntSurvivePathNum; ++i)
+            {
+                PrecType sharedPathDotProduct = 0;
+                for (int j = 0; j < layer; ++j)
+                {
+                    sharedPathDotProduct += survivors[i][j] * R(2 * Detection::TxAntNum - 1 - layer, 2 * Detection::TxAntNum - 1 - j);
+                }
+
+                PrecType zMinusSharedPathDotProduct = z(2 * Detection::TxAntNum - 1 - layer) - sharedPathDotProduct;
+                for (int j = 0; j < symbols.size(); ++j)
+                {
+                    PrecType dis = zMinusSharedPathDotProduct - R(2 * Detection::TxAntNum - 1 - layer, 2 * Detection::TxAntNum - 1 - layer) * QAM::symbolsRD[j];
+                    candidates[i * symbols.size() + j] = currentSurvivePathPED[i] + dis * dis;
+                }
+            }
+
+            auto minIndices = findSmallestKIndices<K>(candidates, currntSurvivePathNum * symbols.size());
+            currntSurvivePathNum = minIndices.size();
+
+            // 将存活路径拷贝进survivors，将新的PED存入currentSurvivePathPED
+            size_t newSurvivePathNum = minIndices.size();
+
+            // copy survivors to survivorsCopy
+            for (size_t i = 0; i < currntSurvivePathNum; ++i)
+            {
+                for (int j = 0; j < layer; ++j)
+                {
+                    survivorsCopy[i][j] = survivors[i][j];
+                }
+            }
+
+            for (size_t i = 0; i < newSurvivePathNum; ++i)
+            {
+                size_t index = minIndices[i];
+                size_t pathIndex = index / symbols.size();
+                size_t symbolIndex = index % symbols.size();
+
+                for (int j = 0; j < layer; ++j)
+                {
+                    survivors[i][j] = survivorsCopy[pathIndex][j];
+                }
+                survivors[i][layer] = symbols[symbolIndex];
+
+                currentSurvivePathPED[i] = candidates[index];
+            }
+        }
+
+        Eigen::Vector<PrecType, 2 * Detection::TxAntNum> result;
+        for (int i = 0; i < 2 * Detection::TxAntNum; ++i)
+        {
+            result[i] = survivors[0][2 * Detection::TxAntNum - 1 - i];
+        }
+        return result;
 
 
+    }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+ 
+};
 
 
 
