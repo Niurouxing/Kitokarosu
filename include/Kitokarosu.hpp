@@ -15,7 +15,7 @@
 namespace Kito{
 
 // 初始化随机数生成器
-inline static std::mt19937 gen;
+inline static thread_local std::mt19937 gen;
 // inline static std::mt19937 gen(0);
 
 inline void set_random_seed(unsigned int seed) {
