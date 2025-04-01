@@ -27,7 +27,7 @@ inline void set_random_seed(unsigned int seed) {
 template <int min, int max>
 inline static int uniform_int_distribution()
 {
-    static std::uniform_int_distribution<int> dist(min, max);
+    thread_local static std::uniform_int_distribution<int> dist(min, max);
     return dist(gen);
 }
 
@@ -35,7 +35,7 @@ inline static int uniform_int_distribution()
 template <auto mean, auto stddev>
 inline static double normal_distribution()
 {
-    static std::normal_distribution<double> dist(mean, stddev);
+    thread_local static std::normal_distribution<double> dist(mean, stddev);
     return dist(gen);
 }
 
@@ -938,7 +938,7 @@ public:
 
 
         // uint64_t随机数生成器
-        static std::uniform_int_distribution<uint64_t> uint64_dist;
+        thread_local static std::uniform_int_distribution<uint64_t> uint64_dist;
 
         // cWord 的前 fullZcNum 个元素随机
         for (unsigned i = 0; i < fullZcNum; i++)
@@ -1130,8 +1130,8 @@ public:
         constexpr unsigned nMaxLayer = ((mKBar + mR - 1) / mR + mF + mZc - 1) / mZc - BG::nMaxLayerOffset;
 
         // initialize msg from check nodes to vector nodes, each edge correspond a message
-        static std::array<std::array<double, mZc>, totEdges> CtoVMsg{};
-        static std::array<std::array<double, mZc>, BG::MaxLayerEdges> VtoCMsg{};
+        thread_local static std::array<std::array<double, mZc>, totEdges> CtoVMsg{};
+        thread_local static std::array<std::array<double, mZc>, BG::MaxLayerEdges> VtoCMsg{};
         // llr updates
         for (unsigned iIter = 0; iIter < nMaxIter; iIter++)
         {
@@ -1390,7 +1390,7 @@ public:
     inline auto judge(T &symbolsEst)
     {
 
-        static std::array<size_t, 2 * TxAntNum> wrongBits;
+        thread_local std::array<size_t, 2 * TxAntNum> wrongBits;
 
         std::transform(
             symbolsEst.begin(), symbolsEst.end(), TxIndices.begin(),
@@ -1411,7 +1411,7 @@ public:
         requires  (FirstElementIsIntegral<T>)
     inline auto judge(T &bitsEst)
     {
-        static std::array<size_t, 2 * TxAntNum> wrongBits;
+        thread_local std::array<size_t, 2 * TxAntNum> wrongBits;
 
         std::transform(bitsEst.begin(), bitsEst.end(), TxIndices.begin(),
                        wrongBits.begin(), [](auto bits, size_t index) {
@@ -1614,6 +1614,11 @@ public:
     Eigen::Matrix<PrecType, 2 * Detection::TxAntNum, 2 * Detection::TxAntNum> R;
     Eigen::Matrix<PrecType, 2 * Detection::TxAntNum, 1> z;
 
+    std::array<PrecType, K * QAM::symbolsRD.size()> candidates;
+    std::array<std::array<PrecType, 2 * Detection::TxAntNum>, K> survivors;
+    std::array<std::array<PrecType, 2 * Detection::TxAntNum>, K> survivorsCopy;
+    std::array<PrecType, K> currentSurvivePathPED;
+
     void initializeQR(const Detection &det)
     {
         // QR分解
@@ -1628,10 +1633,7 @@ public:
         initializeQR(det);
 
         auto& symbols = QAM::symbolsRD;
-        static std::array<PrecType, K * symbols.size()> candidates;
-        static std::array<std::array<PrecType, 2 * Detection::TxAntNum>, K> survivors;
-        static std::array<std::array<PrecType, 2 * Detection::TxAntNum>, K> survivorsCopy;
-        static std::array<PrecType, K> currentSurvivePathPED;
+
 
         currentSurvivePathPED.fill(0);
 
