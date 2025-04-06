@@ -1287,7 +1287,7 @@ public:
     Eigen::Vector<PrecType, 2 * RxAntNum> RxSymbols;
     // Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum> H;
 
-    static constexpr bool heapAlloc = TxAntNum * RxAntNum > 128 * 128;
+    static constexpr bool heapAlloc = TxAntNum * RxAntNum >= 64 * 64;
 
     // if TxAntNum * RxAntNum >= 128 * 128, use dynamic allocation
     using H_type = std::conditional_t<heapAlloc,
@@ -1609,27 +1609,96 @@ public:
     using QAM = typename Detection::ModType;
     using PrecType = typename Detection::PrecType;
 
+    inline static constexpr auto TxAntNum = Detection::TxAntNum;
+    inline static constexpr auto RxAntNum = Detection::RxAntNum;
+
     // 矩阵存储
-    Eigen::Matrix<PrecType, 2 * Detection::RxAntNum, 2 * Detection::TxAntNum> Q;
-    Eigen::Matrix<PrecType, 2 * Detection::TxAntNum, 2 * Detection::TxAntNum> R;
+    inline static constexpr bool heapAlloc = TxAntNum * RxAntNum >= 64 * 64;
+    using R_type = std::conditional_t<heapAlloc,
+                                      Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>,
+                                      Eigen::Matrix<PrecType, 2 * TxAntNum, 2 * TxAntNum>>;
+
+    R_type R;
+
     Eigen::Matrix<PrecType, 2 * Detection::TxAntNum, 1> z;
 
-    std::array<PrecType, K * QAM::symbolsRD.size()> candidates;
-    std::array<std::array<PrecType, 2 * Detection::TxAntNum>, K> survivors;
-    std::array<std::array<PrecType, 2 * Detection::TxAntNum>, K> survivorsCopy;
+    using candidates_type = std::conditional_t<heapAlloc,
+    std::vector<PrecType>,
+    std::array<PrecType, K * QAM::symbolsRD.size()>>;
+    candidates_type candidates;
+
+    using survivor_inner_type = std::array<PrecType, 2 * Detection::TxAntNum>;
+    using survivors_type = std::conditional_t<heapAlloc,
+    std::vector<survivor_inner_type>,
+    std::array<survivor_inner_type, K>>;
+    survivors_type survivors;
+    survivors_type survivorsCopy;
+
+
+
+
     std::array<PrecType, K> currentSurvivePathPED;
 
     void initializeQR(const Detection &det)
     {
+        auto &H = det.H;
         // QR分解
-        Eigen::HouseholderQR<decltype(Q)> qr(det.H);
-        Q = qr.householderQ();
-        R = qr.matrixQR().template triangularView<Eigen::Upper>();
-        z = Q.transpose() * det.RxSymbols;
+        if constexpr (TxAntNum == RxAntNum)
+        {
+            // no need to slice Q and R in such scenario
+            if constexpr  (heapAlloc)
+            {
+                Eigen::HouseholderQR<Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>> qr(H);
+
+                R = qr.matrixQR().template triangularView<Eigen::Upper>();
+                z = qr.householderQ().transpose() * det.RxSymbols;
+            }
+            else
+            {
+                Eigen::HouseholderQR<Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>> qr(H);
+
+                R = qr.matrixQR().template triangularView<Eigen::Upper>();
+                z = qr.householderQ().transpose() * det.RxSymbols;
+            }
+        }
+        else
+        {
+            if constexpr (heapAlloc)
+            {
+                Eigen::HouseholderQR<Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>> qr(H);
+                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> bQ = qr.householderQ();
+                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> bR = qr.matrixQR().template triangularView<Eigen::Upper>();
+
+                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> Q = bQ.leftCols(2 * TxAntNum);
+                R = bR.topRows(2 * TxAntNum);
+
+                z = (Q.transpose() * det.RxSymbols);
+            }
+            else
+            {
+                Eigen::HouseholderQR<Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>> qr(H);
+                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * RxAntNum> bQ = qr.householderQ();
+                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum> bR = qr.matrixQR().template triangularView<Eigen::Upper>();
+
+                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum> Q = bQ.leftCols(2 * TxAntNum);
+                R = bR.topRows(2 * TxAntNum);
+
+                z = (Q.transpose() * det.RxSymbols);
+            }
+        }
     }
 
     auto run(const Detection &det)
     {
+        if constexpr (heapAlloc)
+        {
+            R.resize(2 * TxAntNum, 2 * TxAntNum);
+            survivors.resize(K);
+            survivorsCopy.resize(K);
+            candidates.resize(K * QAM::symbolsRD.size());
+        }
+
+
         initializeQR(det);
 
         auto& symbols = QAM::symbolsRD;
