@@ -1296,6 +1296,7 @@ public:
 
     H_type H;
 
+    double SNRdB = 0;
     double Nv = 1;
     double sqrtNvDiv2 = std::sqrt(Nv / 2);
 
@@ -1309,6 +1310,7 @@ public:
 
     void setSNR(const double SNRdB)
     {
+        this->SNRdB = SNRdB;
         Nv = TxAntNum * RxAntNum /
              (std::pow(10, SNRdB / 10) * ModType::bitLength * TxAntNum);
         sqrtNvDiv2 = std::sqrt(Nv / 2);
