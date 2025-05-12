@@ -25,7 +25,7 @@ target_link_libraries(Kitokarosu
 )
 
 # 启用示例（可选）
-option(BUILD_EXAMPLES "Build examples" ON)
-if(BUILD_EXAMPLES)
-    add_subdirectory(examples)
-endif()
+# option(BUILD_EXAMPLES "Build examples" ON)
+# if(BUILD_EXAMPLES)
+#     add_subdirectory(examples)
+# endif()
