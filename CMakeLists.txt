@@ -25,7 +25,14 @@ target_link_libraries(Kitokarosu
 )
 
 # 启用示例（可选）
-# option(BUILD_EXAMPLES "Build examples" ON)
-# if(BUILD_EXAMPLES)
-#     add_subdirectory(examples)
-# endif()
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    set(_BUILD_EXAMPLES_DEFAULT ON)   # 顶层工程
+else()
+    set(_BUILD_EXAMPLES_DEFAULT OFF)  # 作为子工程
+endif()
+
+option(BUILD_EXAMPLES "Build Kitokarosu examples" ${_BUILD_EXAMPLES_DEFAULT})
+
+if(BUILD_EXAMPLES)
+    add_subdirectory(examples)
+endif()
