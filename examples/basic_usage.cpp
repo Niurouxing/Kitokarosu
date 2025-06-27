@@ -1,116 +1,175 @@
-// main.cpp
-
 #include "Kitokarosu.hpp"
 #include <iostream>
 #include <numeric>
 #include <vector>
-#include <array> // 确保包含了<array>头文件
+#include <array>
+#include <iomanip> // 用于格式化输出
+#include <cmath>   // 用于 std::round, 避免浮点数循环的精度问题
 
 using namespace Kito;
-int main()
-{
-    // --- 仿真参数定义 ---
-    constexpr size_t TxAntNum = 4;
-    constexpr size_t RxAntNum = 4;
+
+// --- 1. 参数配置结构化 (遵循您的要求) ---
+// 使用简短的名称，所有参数均为 static constexpr 以支持模板编译。
+struct SimConfig {
+    // MIMO 和调制参数
+    static constexpr size_t TxAntNum = 4;
+    static constexpr size_t RxAntNum = 4;
     using QAM = QAM16<float>;
 
-    constexpr double snr_db = 30.0;
-    constexpr size_t S = 10;
-    constexpr int ldpc_max_iter = 10;
-    const int numFrames = 2; // 总共要仿真的帧数
+    // SNR 扫描范围设置
+    static constexpr double snr_start_db = 0.0;
+    static constexpr double snr_end_db = 10.0;
+    static constexpr double snr_step_db = 2.0;
 
-    set_random_seed(123); // 设置随机数种子
+    // 每个SNR点的仿真停止条件
+    static constexpr long long max_frame_errors = 100;
+    static constexpr long long max_total_frames = 100000;
 
-    // L = TxAntNum, M = 符号数 * 每符号比特数
-    constexpr size_t M = S * TxAntNum * QAM::bitLength;
-    constexpr double rate = 0.5;
-    constexpr auto K = static_cast<size_t>(rate * M); // 每帧的信息比特数
+    // 帧结构和编码参数
+    static constexpr size_t S = 10;
+    static constexpr double ldpc_rate = 0.5;
+    static constexpr int ldpc_max_iter = 10;
 
-    // --- 仿真器和状态变量初始化 ---
-    auto det = Detection<Rx<RxAntNum>, Tx<TxAntNum>, Mod<QAM>>();
-    det.setSNR(snr_db);
+    // 派生参数 (自动计算)
+    static constexpr size_t M = S * TxAntNum * QAM::bitLength;
+    static constexpr size_t K = static_cast<size_t>(ldpc_rate * M);
+};
 
-    long long total_bit_errors = 0;
-    long long total_frame_errors = 0;
+// 用于存储每个SNR点的仿真结果
+struct SimulationResult {
+    double snr_db;
+    long long total_frames;
+    long long frame_errors;
+    long long bit_errors;
+    double ber;
+    double fer;
+};
 
-    // --- 主仿真循环 ---
-    for (int frame = 0; frame < numFrames; ++frame)
-    {
-        // 1. LDPC 编码与速率匹配
-        // 在循环内创建，以确保每帧都生成新的随机信息比特
-        auto ldpc = nrLDPC<K, rate>();
-        ldpc.encode();
+// --- 4. 实时进度显示函数 ---
+void print_progress(double snr_db, long long frames, long long max_frames, long long err_frames, long long max_err_frames) {
+    // 使用 \r 回到行首来刷新当前行，实现动态显示
+    std::cout << "\r" << std::fixed << std::setprecision(1)
+              << "--> SNR: " << snr_db << " dB | "
+              << "Frames: " << frames << "/" << max_frames << " | "
+              << "Errors: " << err_frames << "/" << max_err_frames
+              << "   " << std::flush; // 添加空格以清除行尾可能残留的字符
+}
 
-        auto rm = std::array<bool, M>{};
-        ldpc.rateMatch(rm);
+// 打印最终结果的表格
+void print_summary_table(const std::vector<SimulationResult>& results) {
+    std::cout << "\n\n--- Simulation Summary ---" << std::endl;
+    std::cout << "+----------+--------------------+----------------+----------------+------------+------------+" << std::endl;
+    std::cout << "| SNR (dB) |      Frames        |  Frame Errors  |   Bit Errors   |    FER     |    BER     |" << std::endl;
+    std::cout << "+----------+--------------------+----------------+----------------+------------+------------+" << std::endl;
 
-        // 2. MIMO 检测与 LLR 计算
-        auto LLR_all = std::array<double, M>{};
-        // (修正) 原代码中存在错误的嵌套循环，这里已修正为单层循环
-        for (int s = 0; s < S; s++)
+    std::cout << std::scientific << std::setprecision(3); // 设置科学计数法格式
+    for (const auto& res : results) {
+        std::cout << "| " << std::setw(8) << std::fixed << std::setprecision(2) << res.snr_db << " | "
+                  << std::setw(18) << res.total_frames << " | "
+                  << std::setw(14) << res.frame_errors << " | "
+                  << std::setw(14) << res.bit_errors << " | "
+                  << std::scientific << std::setw(10) << res.fer << " | "
+                  << std::scientific << std::setw(10) << res.ber << " |"
+                  << std::endl;
+    }
+    std::cout << "+----------+--------------------+----------------+----------------+------------+------------+" << std::endl;
+}
+
+int main() {
+    // 打印固定的系统参数
+    std::cout << "--- System Parameters ---" << std::endl;
+    std::cout << "  MIMO Config: " << SimConfig::TxAntNum << "x" << SimConfig::RxAntNum << std::endl;
+    std::cout << "  Modulation:  " << "16-QAM" << std::endl; // 可以做得更通用，但目前写死即可
+    std::cout << "  LDPC Rate:   " << SimConfig::ldpc_rate << std::endl;
+    std::cout << "  Info bits/Frame (K): " << SimConfig::K << std::endl;
+    std::cout << "  Coded bits/Frame (M): " << SimConfig::M << std::endl;
+    std::cout << "-------------------------" << std::endl;
+
+    // 用于存储所有SNR点的结果
+    std::vector<SimulationResult> results_vec;
+
+    // --- 2. SNR 扫描循环 (采用整数循环以避免浮点数精度问题) ---
+    const int num_snr_steps = static_cast<int>(std::round((SimConfig::snr_end_db - SimConfig::snr_start_db) / SimConfig::snr_step_db));
+
+    for (int i = 0; i <= num_snr_steps; ++i) {
+        const double snr_db = SimConfig::snr_start_db + i * SimConfig::snr_step_db;
+        
+        // 初始化当前SNR点的仿真器和状态变量
+        auto det = Detection<Rx<SimConfig::RxAntNum>, Tx<SimConfig::TxAntNum>, Mod<SimConfig::QAM>>();
+        det.setSNR(snr_db);
+
+        long long total_bit_errors = 0;
+        long long total_frame_errors = 0;
+        long long frame_count = 0;
+
+        std::cout << "\nStarting simulation for SNR = " << std::fixed << std::setprecision(2) << snr_db << " dB..." << std::endl;
+
+        // --- 3. 动态仿真停止条件的帧循环 ---
+        while (total_frame_errors < SimConfig::max_frame_errors && frame_count < SimConfig::max_total_frames)
         {
-            det.generate(rm.begin() + s * TxAntNum * QAM::bitLength);
+            // 1. LDPC 编码与速率匹配 (使用 SimConfig 中的模板参数)
+            auto ldpc = nrLDPC<SimConfig::K, SimConfig::ldpc_rate>();
+            ldpc.encode();
 
-            auto mmse = MMSE<QAM, float,TxAntNum, RxAntNum>(det.H, det.RxSymbols, static_cast<float>(det.Nv));
+            auto rm = std::array<bool, SimConfig::M>{};
+            ldpc.rateMatch(rm);
 
-            mmse.compute_llr();
-
-            std::copy(mmse.llr.data(), mmse.llr.data() + mmse.llr.size(),
-                      LLR_all.data() + s * TxAntNum * QAM::bitLength);
-        }
-
-        // 3. LDPC 速率恢复与译码
-        ldpc.rateRecover(LLR_all);
-        auto res = ldpc.decode(ldpc_max_iter);
-
-        // 4. 错误统计
-        size_t current_frame_bit_errors = 0;
-        // 确保译码输出的比特数和原始信息比特数一致
-        if (res.size() == ldpc.msg.size())
-        {
-            for (size_t i = 0; i < K; ++i)
+            // 2. MIMO 检测与 LLR 计算
+            auto LLR_all = std::array<double, SimConfig::M>{};
+            for (size_t s = 0; s < SimConfig::S; s++)
             {
-                if (res[i] != ldpc.msg[i])
-                {
-                    current_frame_bit_errors++;
+                det.generate(rm.begin() + s * SimConfig::TxAntNum * SimConfig::QAM::bitLength);
+
+                auto mmse = MMSE<SimConfig::QAM, float, SimConfig::TxAntNum, SimConfig::RxAntNum>(det.H, det.RxSymbols, static_cast<float>(det.Nv));
+                mmse.compute_llr();
+
+                std::copy(mmse.llr.data(), mmse.llr.data() + mmse.llr.size(),
+                          LLR_all.data() + s * SimConfig::TxAntNum * SimConfig::QAM::bitLength);
+            }
+
+            // 3. LDPC 速率恢复与译码
+            ldpc.rateRecover(LLR_all);
+            auto res = ldpc.decode(SimConfig::ldpc_max_iter);
+
+            // 4. 错误统计
+            size_t current_frame_bit_errors = 0;
+            if (res.size() == ldpc.msg.size()) {
+                for (size_t k = 0; k < SimConfig::K; ++k) {
+                    if (res[k] != ldpc.msg[k]) {
+                        current_frame_bit_errors++;
+                    }
                 }
+            } else {
+                current_frame_bit_errors = SimConfig::K;
+            }
+
+            if (current_frame_bit_errors > 0) {
+                total_bit_errors += current_frame_bit_errors;
+                total_frame_errors++;
+            }
+            frame_count++;
+
+            // 持续显示当前SNR仿真情况 (有错误时或每10帧更新一次)
+            if (total_frame_errors > 0 || frame_count % 10 == 0) {
+                 print_progress(snr_db, frame_count, SimConfig::max_total_frames, total_frame_errors, SimConfig::max_frame_errors);
             }
         }
-        else // 如果长度不一致，说明发生严重错误，整帧计为错误
-        {
-            current_frame_bit_errors = K;
-        }
+        
+        // 确保进度条被清除并换行
+        std::cout << std::endl; 
 
-        if (current_frame_bit_errors > 0)
-        {
-            total_bit_errors += current_frame_bit_errors;
-            total_frame_errors++;
-        }
-        // 打印进度
-        std::cout << "Frames Processed: " << frame + 1 << "/" << numFrames << "\r";
-        std::cout.flush();
+        // 计算并存储当前SNR点的结果
+        double ber = (frame_count == 0) ? 0.0 : (static_cast<double>(total_bit_errors)) / (static_cast<double>(frame_count) * SimConfig::K);
+        double fer = (frame_count == 0) ? 0.0 : (static_cast<double>(total_frame_errors)) / (static_cast<double>(frame_count));
+        
+        results_vec.push_back({snr_db, frame_count, total_frame_errors, total_bit_errors, ber, fer});
+
+        // 打印单点仿真结束信息
+        std::cout << "Finished. Frames: " << frame_count << ", FER: " << fer << ", BER: " << ber << std::endl;
     }
-    std::cout << std::endl; // 结束进度条的换行
 
-    // --- 计算并输出最终结果 ---
-    double ber = (static_cast<double>(total_bit_errors)) / (static_cast<double>(numFrames) * K);
-    double fer = (static_cast<double>(total_frame_errors)) / (static_cast<double>(numFrames));
-
-    std::cout << "--- Simulation Finished ---" << std::endl;
-    std::cout << "Parameters:" << std::endl;
-    std::cout << "  MIMO Config: " << TxAntNum << "x" << RxAntNum << std::endl;
-    std::cout << "  Modulation:  " << "16-QAM" << std::endl;
-    std::cout << "  SNR:         " << snr_db << " dB" << std::endl;
-    std::cout << "  LDPC Rate:   " << rate << std::endl;
-    std::cout << "  Info bits/Frame (K): " << K << std::endl;
-    std::cout << "---------------------------" << std::endl;
-    std::cout << "Results:" << std::endl;
-    std::cout << "  Total Frames: " << numFrames << std::endl;
-    std::cout << "  Frame Errors: " << total_frame_errors << std::endl;
-    std::cout << "  Bit Errors:   " << total_bit_errors << std::endl;
-    std::cout << "  FER: " << fer << std::endl;
-    std::cout << "  BER: " << ber << std::endl;
-    std::cout << "---------------------------" << std::endl;
+    // --- 5. 结果汇总与展示 ---
+    print_summary_table(results_vec);
 
     return 0;
 }
