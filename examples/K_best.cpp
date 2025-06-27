@@ -11,11 +11,11 @@ using Kito::QAM16;
 using Kito::QAM64;
 using Kito::QAM256;
 
-static constexpr size_t TxAntNum = 8;
-static constexpr size_t RxAntNum = 16;
-static constexpr size_t K = 8;  // K-best size
+static constexpr size_t TxAntNum = 32;
+static constexpr size_t RxAntNum = 32;
+static constexpr size_t K = 32;  // K-best size
 
-using QAM = QAM256<float>;
+using QAM = QAM64<float>;
 using Kito::Detection;
 using Kito::Mod;
 using Kito::Rx;
@@ -30,7 +30,7 @@ struct ThreadResult {
 int main(int argc, char* argv[]) {
     int max_sample = 10000000;  // 最大样本数防止无限循环
     int err_frame_threshold = 1000;  // 错误帧阈值
-    int snr_start = 16;  // Default start SNR
+    int snr_start = 24;  // Default start SNR
     int snr_end = 24;    // Default end SNR
     int snr_step = 1;    // Default SNR step size
     unsigned int seed = 114514;

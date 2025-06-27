@@ -16,7 +16,7 @@ namespace Kito{
 
 // 初始化随机数生成器
 inline static thread_local std::mt19937 gen;
-// inline static std::mt19937 gen(0);
+
 
 inline void set_random_seed(unsigned int seed) {
     gen.seed(seed);
@@ -1132,6 +1132,12 @@ public:
         // initialize msg from check nodes to vector nodes, each edge correspond a message
         thread_local static std::array<std::array<double, mZc>, totEdges> CtoVMsg{};
         thread_local static std::array<std::array<double, mZc>, BG::MaxLayerEdges> VtoCMsg{};
+
+        for (auto& row : CtoVMsg)
+        {
+            row.fill(0.0);
+        }
+        
         // llr updates
         for (unsigned iIter = 0; iIter < nMaxIter; iIter++)
         {
@@ -1457,19 +1463,17 @@ template <typename... Args>
 using Detection = typename DetectionInputHelper<Args...>::type;
 
 
-
-
-
 template <typename ModType, typename PrecType, size_t TxAntNum, size_t RxAntNum>
 class MMSE {
 public:
+    // Eigen 类型定义保持不变
     using MatrixH = Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>;
     using VectorY = Eigen::Matrix<PrecType, 2 * RxAntNum, 1>;
     using MatrixW = Eigen::Matrix<PrecType, 2 * TxAntNum, 2 * RxAntNum>;
     using VectorX = Eigen::Matrix<PrecType, 2 * TxAntNum, 1>;
     using VectorMu = Eigen::Matrix<PrecType, 2 * TxAntNum, 1>;
     using VectorSigma = Eigen::Matrix<PrecType, 2 * TxAntNum, 1>;
-    
+
     // 中间结果存储
     MatrixW W;
     VectorMu mu;
@@ -1485,11 +1489,13 @@ public:
 
     MMSE(const MatrixH& H, const VectorY& y, PrecType Nv) 
         : H_(H), y_(y), Nv_(Nv) {
-        calculate_mmse_matrix();
-        estimate_symbols();
-        normalize_symbols();
+        // 调用重写的计算函数
+        calculate_mmse_matrix_manual();
+        estimate_symbols_manual();
+        normalize_symbols_manual();
     }
 
+    // LLR 计算部分保持不变，因为它已经是手动计算
     void compute_llr() {
         const size_t total_bits = 2 * TxAntNum * bits_per_dim;
         llr.resize(total_bits);
@@ -1503,6 +1509,7 @@ public:
                 PrecType min_dist_1 = min_dist_0;
                 
                 for(size_t k = 0; k < symbols.size(); ++k) {
+                    // 假设的比特映射逻辑
                     const bool bit = (k >> (bits_per_dim - 1 - b)) & 1;
                     const PrecType dist = std::pow(s - symbols[k], 2);
                     
@@ -1518,7 +1525,7 @@ public:
         }
     }
 
-    // 获取中间结果的接口
+    // 获取中间结果的接口保持不变
     const VectorX& estimated_symbols() const { return x_est; }
     const VectorX& normalized_symbols() const { return s_norm; }
     const Eigen::Matrix<PrecType, Eigen::Dynamic, 1>& get_llr() const { return llr; }
@@ -1528,25 +1535,202 @@ private:
     VectorY y_;
     PrecType Nv_;
 
-    void calculate_mmse_matrix() {
-        MatrixW HtH = H_.transpose() * H_;
-        W = (HtH + Nv_ * MatrixW::Identity()).inverse() * H_.transpose();
-        mu = (W * H_).diagonal();
+    // 定义矩阵维度常量以便复用
+    static constexpr size_t M = 2 * TxAntNum; // H 的列数，W 的行数
+    static constexpr size_t K = 2 * RxAntNum; // H 的行数，W 的列数
+
+    // =========================================================================
+    // == 手动实现的计算函数
+    // =========================================================================
+
+    // 辅助函数：优化的Cholesky分解 A = L*L^T (L的对角线为 1/sqrt(...) )
+    // A 是一个 M x M 的对称正定矩阵
+    void cholesky_decomposition(const Eigen::Matrix<PrecType, M, M>& A, Eigen::Matrix<PrecType, M, M>& L) {
+        L.setZero();
+        for (size_t i = 0; i < M; ++i) {
+            for (size_t j = 0; j <= i; ++j) {
+                PrecType sum = 0;
+                for (size_t k = 0; k < j; ++k) {
+                    sum += L(i, k) * L(j, k);
+                }
+
+                if (i == j) {
+                    PrecType diagonal_val = A(i, i) - sum;
+                    if (diagonal_val <= 1e-9) { // 增加数值稳定性检查
+                        // 错误处理或设置为一个很小的值
+                        // std::cerr << "Error: Matrix is not positive definite!" << std::endl;
+                        // exit(1);
+                        diagonal_val = 1e-9;
+                    }
+                    L(i, j) = 1.0 / std::sqrt(diagonal_val);
+                } else {
+                    L(i, j) = (A(i, j) - sum) * L(j, j);
+                }
+            }
+        }
+
+        // print L for debugging
+        // std::cout << "Cholesky factor L:\n" << L << std::endl;
     }
 
-    void estimate_symbols() {
-        x_est = W * y_;
-        
-        // 计算有效噪声方差
-        for(int i = 0; i < 2 * TxAntNum; ++i) {
-            PrecType interference = (W.row(i) * H_).squaredNorm() - mu[i] * mu[i];
-            PrecType noise_amp = W.row(i).squaredNorm();
-            sigma_eff_sq[i] = (0.5 * interference + (Nv_/2) * noise_amp) / (mu[i] * mu[i]);
+    // 辅助函数：计算下三角矩阵 L 的逆
+    // L 的对角线元素是已经求过倒数的
+    void invert_lower_triangular(const Eigen::Matrix<PrecType, M, M>& L, Eigen::Matrix<PrecType, M, M>& Linv) {
+        Linv.setZero();
+        for (size_t j = 0; j < M; ++j) {
+            Linv(j, j) = L(j, j); // 对角元素直接复制 (已经是倒数形式)
+            
+            for (size_t i = j + 1; i < M; ++i) {
+                PrecType sum = 0;
+                for (size_t k = j; k < i; ++k) {
+                    sum += L(i, k) * Linv(k, j);
+                }
+                Linv(i, j) = -sum * L(i, i);
+            }
         }
     }
 
-    void normalize_symbols() {
-        s_norm = x_est.array() / mu.array();
+    // 辅助函数：从Cholesky因子计算矩阵的逆 A_inv = (L_inv)^T * L_inv
+    void invert_from_cholesky(const Eigen::Matrix<PrecType, M, M>& L, Eigen::Matrix<PrecType, M, M>& A_inv) {
+        Eigen::Matrix<PrecType, M, M> Linv;
+        invert_lower_triangular(L, Linv);
+
+        // A_inv = Linv^T * Linv (高效计算)
+        // Linv 是下三角矩阵
+        for (size_t i = 0; i < M; ++i) {
+            for (size_t j = i; j < M; ++j) { // 只计算上三角部分，然后利用对称性
+                PrecType sum = 0;
+                // Linv^T的第i行是Linv的第i列
+                // Linv的第j列
+                for (size_t k = j; k < M; ++k) { // 优化：k从j开始，因为Linv(k,i)和Linv(k,j)在k<i或k<j时为0
+                    sum += Linv(k, i) * Linv(k, j);
+                }
+                A_inv(i, j) = sum;
+                if (i != j) {
+                    A_inv(j, i) = sum; // 利用对称性
+                }
+            }
+        }
+
+        // print A_inv for debugging
+        // std::cout << "Inverse matrix A_inv:\n" << A_inv << std::endl;
+
+    }
+
+
+    // 重写 calculate_mmse_matrix，使用手动计算
+    void calculate_mmse_matrix_manual() {
+        // 1. 计算 A = H^T * H + Nv * I
+        Eigen::Matrix<PrecType, M, M> A;
+        // 计算 H^T * H
+        for (size_t i = 0; i < M; ++i) {
+            for (size_t j = i; j < M; ++j) { // 利用对称性，只计算上三角和对角线
+                PrecType sum = 0;
+                for (size_t k = 0; k < K; ++k) {
+                    sum += H_(k, i) * H_(k, j); // H_T(i, k) * H_(k, j)
+                }
+                A(i, j) = sum;
+                if (i != j) A(j, i) = sum; // 填充下三角
+            }
+        }
+        // 加上 Nv * I
+        for (size_t i = 0; i < M; ++i) {
+            A(i, i) += Nv_;
+        }
+
+        // print A for debugging
+        // std::cout << "Matrix A (H^T * H + Nv * I):\n" << A << std::endl;
+
+        // 2. 计算 A 的逆: A_inv = (H^T * H + Nv * I)^-1
+        Eigen::Matrix<PrecType, M, M> L;
+        Eigen::Matrix<PrecType, M, M> A_inv;
+        cholesky_decomposition(A, L);
+        invert_from_cholesky(L, A_inv);
+        
+        // 3. 计算 W = A_inv * H^T
+        for (size_t i = 0; i < M; ++i) {
+            for (size_t j = 0; j < K; ++j) {
+                PrecType sum = 0;
+                for (size_t k = 0; k < M; ++k) {
+                    sum += A_inv(i, k) * H_(j, k); // H_T 的 (k, j) 元素是 H 的 (j, k) 元素
+                }
+                W(i, j) = sum;
+            }
+        }
+
+        // print W for debugging
+        // std::cout << "Matrix W (MMSE matrix):\n" << W << std::endl;
+
+        // 4. 计算 mu = diag(W * H)
+        for (size_t i = 0; i < M; ++i) {
+            PrecType sum = 0;
+            // 计算 W*H 矩阵的第(i, i)个元素
+            for (size_t k = 0; k < K; ++k) {
+                sum += W(i, k) * H_(k, i);
+            }
+            mu(i) = sum;
+        }
+
+        // print mu for debugging
+        // std::cout << "Vector mu (diagonal of W * H):\n" << mu.transpose() << std::endl;
+    }
+
+    // 重写 estimate_symbols，使用手动计算
+    void estimate_symbols_manual() {
+        // 1. 计算 x_est = W * y
+        for (size_t i = 0; i < M; ++i) {
+            PrecType sum = 0;
+            for (size_t k = 0; k < K; ++k) {
+                sum += W(i, k) * y_(k);
+            }
+            x_est(i) = sum;
+        }
+
+        // print x_est for debugging
+        // std::cout << "Estimated symbols x_est:\n" << x_est.transpose() << std::endl;
+        
+        // 2. 计算有效噪声方差 sigma_eff_sq
+        Eigen::Matrix<PrecType, 1, M> WH_row_i; // 存储 W*H 的某一行
+        for (int i = 0; i < M; ++i) {
+            // 计算 W*H 的第 i 行
+            for (int j = 0; j < M; ++j) {
+                PrecType sum = 0;
+                for (int k = 0; k < K; ++k) {
+                    sum += W(i, k) * H_(k, j);
+                }
+                WH_row_i(j) = sum;
+            }
+
+            // 计算干扰项：|| W_i * H ||^2 - mu_i^2
+            PrecType wh_row_norm_sq = 0;
+            for (int j = 0; j < M; ++j) {
+                wh_row_norm_sq += WH_row_i(j) * WH_row_i(j);
+            }
+            PrecType interference = wh_row_norm_sq - mu[i] * mu[i];
+
+            // 计算噪声放大项：|| W_i ||^2
+            PrecType noise_amp = 0;
+            for (int k = 0; k < K; ++k) {
+                noise_amp += W(i, k) * W(i, k);
+            }
+            
+            // 计算有效噪声方差
+            // 原论文公式为: (E[|x_i - mu_i*s_i|^2]) / mu_i^2 = (0.5 * interference + (Nv/2) * noise_amp) / mu_i^2
+            // 这里假设Es=1，实数域处理，所以去掉0.5
+            sigma_eff_sq[i] = (interference + Nv_ * noise_amp) / (mu[i] * mu[i]);
+        }
+
+        // print sigma_eff_sq for debugging
+        // std::cout << "Effective noise variance sigma_eff_sq:\n" << sigma_eff_sq.transpose() << std::endl;
+    }
+
+    // 重写 normalize_symbols，使用手动计算
+    void normalize_symbols_manual() {
+        for (size_t i = 0; i < M; ++i) {
+            s_norm(i) = x_est(i) / mu(i);
+        }
+        // print normalized symbols for debugging
+        // std::cout << "Normalized symbols s_norm:\n" << s_norm.transpose() << std::endl;
     }
 };
 

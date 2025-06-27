@@ -1,85 +1,116 @@
+// main.cpp
+
 #include "Kitokarosu.hpp"
 #include <iostream>
+#include <numeric>
+#include <vector>
+#include <array> // 确保包含了<array>头文件
 
 using namespace Kito;
-int main() {
-  constexpr size_t TxAntNum = 32;
-  constexpr size_t RxAntNum = 32;
+int main()
+{
+    // --- 仿真参数定义 ---
+    constexpr size_t TxAntNum = 4;
+    constexpr size_t RxAntNum = 4;
+    using QAM = QAM16<float>;
 
-  using QAM = QAM256<float>;
-  auto det = Detection<Rx<RxAntNum>, Tx<TxAntNum>, Mod<QAM>>();
+    constexpr double snr_db = 30.0;
+    constexpr size_t S = 10;
+    constexpr int ldpc_max_iter = 10;
+    const int numFrames = 2; // 总共要仿真的帧数
 
-  det.setSNR(30);
+    set_random_seed(123); // 设置随机数种子
 
-  constexpr size_t S = 14;
+    // L = TxAntNum, M = 符号数 * 每符号比特数
+    constexpr size_t M = S * TxAntNum * QAM::bitLength;
+    constexpr double rate = 0.5;
+    constexpr auto K = static_cast<size_t>(rate * M); // 每帧的信息比特数
 
-  // always assume L = TxAntNum
-  constexpr size_t M = S * TxAntNum * QAM::bitLength;
+    // --- 仿真器和状态变量初始化 ---
+    auto det = Detection<Rx<RxAntNum>, Tx<TxAntNum>, Mod<QAM>>();
+    det.setSNR(snr_db);
 
-  constexpr double rate = 0.433;
+    long long total_bit_errors = 0;
+    long long total_frame_errors = 0;
 
-  constexpr auto K = static_cast<size_t>(rate * M);
+    // --- 主仿真循环 ---
+    for (int frame = 0; frame < numFrames; ++frame)
+    {
+        // 1. LDPC 编码与速率匹配
+        // 在循环内创建，以确保每帧都生成新的随机信息比特
+        auto ldpc = nrLDPC<K, rate>();
+        ldpc.encode();
 
-  auto ldpc = nrLDPC<K, rate>();
-  ldpc.debug();
+        auto rm = std::array<bool, M>{};
+        ldpc.rateMatch(rm);
 
-  auto cw = ldpc.encode();
+        // 2. MIMO 检测与 LLR 计算
+        auto LLR_all = std::array<double, M>{};
+        // (修正) 原代码中存在错误的嵌套循环，这里已修正为单层循环
+        for (int s = 0; s < S; s++)
+        {
+            det.generate(rm.begin() + s * TxAntNum * QAM::bitLength);
 
-  std::cout << "codeword: Size(" << cw.size() << ")\n";
-  for (auto c : cw) {
-    std::cout << c;
-  }
-  std::cout << std::endl;
+            auto mmse = MMSE<QAM, float,TxAntNum, RxAntNum>(det.H, det.RxSymbols, static_cast<float>(det.Nv));
 
-  auto rm = std::array<bool, M>{};
+            mmse.compute_llr();
 
-  ldpc.rateMatch(rm);
+            std::copy(mmse.llr.data(), mmse.llr.data() + mmse.llr.size(),
+                      LLR_all.data() + s * TxAntNum * QAM::bitLength);
+        }
 
-  std::cout << "rate matched: Size(" << rm.size() << ")\n";
-  for (auto c : rm) {
-    std::cout << c;
-  }
-  std::cout << std::endl;
+        // 3. LDPC 速率恢复与译码
+        ldpc.rateRecover(LLR_all);
+        auto res = ldpc.decode(ldpc_max_iter);
 
-  auto LLR_all = std::array<double, M>{};
+        // 4. 错误统计
+        size_t current_frame_bit_errors = 0;
+        // 确保译码输出的比特数和原始信息比特数一致
+        if (res.size() == ldpc.msg.size())
+        {
+            for (size_t i = 0; i < K; ++i)
+            {
+                if (res[i] != ldpc.msg[i])
+                {
+                    current_frame_bit_errors++;
+                }
+            }
+        }
+        else // 如果长度不一致，说明发生严重错误，整帧计为错误
+        {
+            current_frame_bit_errors = K;
+        }
 
-  for (int s = 0; s < S; s++) {
-    // 修改后的主函数检测部分
-    for (int s = 0; s < S; s++) {
-      det.generate(rm.begin() + s * TxAntNum * QAM::bitLength);
-
-      // 创建MMSE检测器实例
-      MMSE<QAM, float, TxAntNum, RxAntNum> mmse(
-          det.H, det.RxSymbols, static_cast<float>(det.Nv));
-
-      // 计算LLR
-      mmse.compute_llr();
-
-      // 获取计算结果
-      const auto &current_llr = mmse.get_llr();
-      std::copy(current_llr.data(), current_llr.data() + current_llr.size(),
-                LLR_all.data() + s * TxAntNum * QAM::bitLength);
+        if (current_frame_bit_errors > 0)
+        {
+            total_bit_errors += current_frame_bit_errors;
+            total_frame_errors++;
+        }
+        // 打印进度
+        std::cout << "Frames Processed: " << frame + 1 << "/" << numFrames << "\r";
+        std::cout.flush();
     }
-  }
+    std::cout << std::endl; // 结束进度条的换行
 
-  std::cout << "LLR_all: " << std::endl;
-  for (auto l : LLR_all) {
-    std::cout << l << " ";
-  }
-  std::cout << std::endl;
+    // --- 计算并输出最终结果 ---
+    double ber = (static_cast<double>(total_bit_errors)) / (static_cast<double>(numFrames) * K);
+    double fer = (static_cast<double>(total_frame_errors)) / (static_cast<double>(numFrames));
 
-  ldpc.rateRecover(LLR_all);
-  auto res = ldpc.decode(10);
+    std::cout << "--- Simulation Finished ---" << std::endl;
+    std::cout << "Parameters:" << std::endl;
+    std::cout << "  MIMO Config: " << TxAntNum << "x" << RxAntNum << std::endl;
+    std::cout << "  Modulation:  " << "16-QAM" << std::endl;
+    std::cout << "  SNR:         " << snr_db << " dB" << std::endl;
+    std::cout << "  LDPC Rate:   " << rate << std::endl;
+    std::cout << "  Info bits/Frame (K): " << K << std::endl;
+    std::cout << "---------------------------" << std::endl;
+    std::cout << "Results:" << std::endl;
+    std::cout << "  Total Frames: " << numFrames << std::endl;
+    std::cout << "  Frame Errors: " << total_frame_errors << std::endl;
+    std::cout << "  Bit Errors:   " << total_bit_errors << std::endl;
+    std::cout << "  FER: " << fer << std::endl;
+    std::cout << "  BER: " << ber << std::endl;
+    std::cout << "---------------------------" << std::endl;
 
-  std::cout << "decoded: Size(" << res.size() << ")\n";
-  for (auto c : res) {
-    std::cout << c;
-  }
-  std::cout << std::endl;
-
-  std::cout << "original: Size(" << ldpc.msg.size() << ")\n";
-  for (auto c : ldpc.msg) {
-    std::cout << c;
-  }
-  std::cout << std::endl;
+    return 0;
 }
