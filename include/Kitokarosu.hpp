@@ -884,7 +884,7 @@ public:
     // fillers length
     inline static constexpr size_t mF = mK - mKBar;
 
-    static_assert(mK > mKBar, "Invalid configuration");
+    static_assert(mK >= mKBar, "Invalid configuration");
 
     inline static constexpr auto mEdges = TannerGenerator<BG>::generateEdges(mZc, mShiftSet);
     inline static constexpr auto mLayers = TannerGenerator<BG>::generateLayers();
