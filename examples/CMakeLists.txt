@@ -4,6 +4,9 @@ project(KitokarosuExamples)
 # 自动查找所有.cpp源文件（排除CMake自动生成的文件）
 file(GLOB SOURCE_FILES CONFIGURE_DEPENDS *.cpp)
 
+# 选项：是否为所有示例强制使用 -O3 优化（默认开启）
+option(EXAMPLES_OPTIMIZE_O3 "Compile all Kitokarosu examples with -O3" ON)
+
 # 遍历每个源文件创建独立可执行文件
 foreach(source IN LISTS SOURCE_FILES)
     # 获取不带扩展名的文件名作为目标名称
@@ -17,6 +20,10 @@ foreach(source IN LISTS SOURCE_FILES)
         PRIVATE
             Kitokarosu
     )
+
+    if(EXAMPLES_OPTIMIZE_O3)
+        target_compile_options(${target_name} PRIVATE -O3)
+    endif()
     
     # 设置统一输出目录
     set_target_properties(${target_name} PROPERTIES

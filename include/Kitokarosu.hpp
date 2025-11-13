@@ -1,5 +1,6 @@
 #pragma once
 #include <Eigen/Dense>
+#include <vector>
 #include <iostream>
 #include <random>
 #include <bitset>
@@ -1958,6 +1959,242 @@ public:
  
 };
 
+
+template <typename Detection>
+class SphereDecoder
+{
+public:
+    // 从Detection模板中提取类型别名和常量
+    using QAM = typename Detection::ModType;
+    using PrecType = typename Detection::PrecType;
+    static constexpr auto TxAntNum = Detection::TxAntNum;
+    static constexpr auto RxAntNum = Detection::RxAntNum;
+    static constexpr size_t N = 2 * TxAntNum; // 实数域下的维度
+
+    // 矩阵存储
+    inline static constexpr bool heapAlloc = TxAntNum * RxAntNum >= 64 * 64;
+    using R_type = std::conditional_t<heapAlloc,
+                                      Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>,
+                                      Eigen::Matrix<PrecType, 2 * TxAntNum, 2 * TxAntNum>>;
+
+    R_type R;
+
+    Eigen::Matrix<PrecType, 2 * Detection::TxAntNum, 1> z;
+
+private:
+    // 内部成员变量，用于搜索过程
+    PrecType radius_sq_; // 当前搜索半径的平方
+    Eigen::Matrix<PrecType, N, 1> best_solution_; // 存储找到的最佳解
+    Eigen::Matrix<PrecType, N, 1> current_path_; // 存储DFS过程中的当前路径
+    const decltype(QAM::symbolsRD)& symbols_; // 星座点引用
+
+public:
+    // 构造函数
+    SphereDecoder() : symbols_(QAM::symbolsRD) {}
+
+
+    auto run(const Detection &det)
+    {
+        initializeQR(det);
+        findInitialRadius();
+        search();
+        return best_solution_;
+    }
+
+private:
+    /**
+     * @brief 对信道矩阵H进行QR分解，得到上三角矩阵R和向量z
+     */
+    void initializeQR(const Detection &det)
+    {
+        auto &H = det.H;
+        // QR分解
+        if constexpr (TxAntNum == RxAntNum)
+        {
+            // no need to slice Q and R in such scenario
+            if constexpr  (heapAlloc)
+            {
+                Eigen::HouseholderQR<Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>> qr(H);
+
+                R = qr.matrixQR().template triangularView<Eigen::Upper>();
+                z = qr.householderQ().transpose() * det.RxSymbols;
+            }
+            else
+            {
+                Eigen::HouseholderQR<Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>> qr(H);
+
+                R = qr.matrixQR().template triangularView<Eigen::Upper>();
+                z = qr.householderQ().transpose() * det.RxSymbols;
+            }
+        }
+        else
+        {
+            if constexpr (heapAlloc)
+            {
+                Eigen::HouseholderQR<Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>> qr(H);
+                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> bQ = qr.householderQ();
+                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> bR = qr.matrixQR().template triangularView<Eigen::Upper>();
+
+                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> Q = bQ.leftCols(2 * TxAntNum);
+                R = bR.topRows(2 * TxAntNum);
+
+                z = (Q.transpose() * det.RxSymbols);
+            }
+            else
+            {
+                Eigen::HouseholderQR<Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>> qr(H);
+                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * RxAntNum> bQ = qr.householderQ();
+                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum> bR = qr.matrixQR().template triangularView<Eigen::Upper>();
+
+                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum> Q = bQ.leftCols(2 * TxAntNum);
+                R = bR.topRows(2 * TxAntNum);
+
+                z = (Q.transpose() * det.RxSymbols);
+            }
+        }
+    }
+
+    void findInitialRadius()
+    {
+        Eigen::Matrix<PrecType, N, 1> initial_solution;
+        
+        // 从最后一层（第 N-1 层）开始向上逐层检测
+        for (int k = N - 1; k >= 0; --k)
+        {
+            PrecType partial_sum = 0;
+            // 计算 R*x 的部分和
+            for (int j = k + 1; j < N; ++j)
+            {
+                partial_sum += R(k, j) * initial_solution(j);
+            }
+
+            // 寻找当前层最接近的星座点
+            PrecType min_dist_sq = std::numeric_limits<PrecType>::max();
+            PrecType best_symbol = symbols_[0];
+
+            for (const auto& symbol : symbols_)
+            {
+                PrecType dist_sq = std::pow(z(k) - partial_sum - R(k, k) * symbol, 2);
+                if (dist_sq < min_dist_sq)
+                {
+                    min_dist_sq = dist_sq;
+                    best_symbol = symbol;
+                }
+            }
+            initial_solution(k) = best_symbol;
+        }
+
+        // 将贪心搜索的结果作为初始最佳解
+        best_solution_ = initial_solution;
+        // 计算其总的PED，并将其设置为初始半径的平方
+        radius_sq_ = (z - R * best_solution_).squaredNorm();
+    }
+
+ 
+    // 非递归深度优先搜索 (Schnorr-Euchner 枚举)
+    void search()
+    {
+        // 每层的候选符号次序（按与Babai估计的距离升序）
+        std::vector<std::vector<int>> order(N);
+        // 每层当前枚举到的索引
+        std::vector<int> idx(N, 0);
+        // 累计PED：ped[k] 表示从最底层 N-1 到 k+1 已经累加的距离；ped[N]=0 方便统一公式
+        std::vector<PrecType> ped(N + 1, PrecType(0));
+
+        int k = static_cast<int>(N) - 1; // 当前层 (从 N-1 向 0)
+
+        // 为了在回溯后重建枚举次序，我们使用一个标志：当下降到新层时清空 order[k]
+        while (true)
+        {
+            // 若是第一次到达该层 (idx[k]==0 且 order[k] 为空) 则构造枚举次序
+            if (order[k].empty())
+            {
+                // 计算 partial_sum = sum_{j=k+1}^{N-1} R(k,j)*x_j
+                PrecType partial_sum = 0;
+                for (int j = k + 1; j < static_cast<int>(N); ++j)
+                {
+                    partial_sum += R(k, j) * current_path_(j);
+                }
+                // Babai 估计中心点
+                PrecType center = (z(k) - partial_sum) / R(k, k);
+                // 生成 (symbolIndex, 距离平方) 列表
+                std::vector<std::pair<int, PrecType>> tmp; tmp.reserve(symbols_.size());
+                for (int si = 0; si < static_cast<int>(symbols_.size()); ++si)
+                {
+                    PrecType d = symbols_[si] - center;
+                    tmp.emplace_back(si, d * d);
+                }
+                // 按距离升序排列，实现 Schnorr-Euchner 枚举次序
+                std::sort(tmp.begin(), tmp.end(), [](auto &a, auto &b){ return a.second < b.second; });
+                order[k].reserve(tmp.size());
+                for (auto &p : tmp) order[k].push_back(p.first);
+            }
+
+            // 枚举当前层的候选符号
+            if (idx[k] < static_cast<int>(order[k].size()))
+            {
+                int si = order[k][idx[k]];
+
+                // 计算 partial_sum (可进一步优化成增量式，这里保持与递归一致的复杂度)
+                PrecType partial_sum = 0;
+                for (int j = k + 1; j < static_cast<int>(N); ++j)
+                {
+                    partial_sum += R(k, j) * current_path_(j);
+                }
+
+                PrecType symbol = symbols_[si];
+                PrecType diff = z(k) - partial_sum - R(k, k) * symbol;
+                PrecType new_ped = ped[k + 1] + diff * diff;
+
+                if (new_ped < radius_sq_)
+                {
+                    // 接受该符号
+                    current_path_(k) = symbol;
+                    ped[k] = new_ped;
+
+                    if (k == 0)
+                    {
+                        // 叶子节点：更新最优解与半径
+                        best_solution_ = current_path_;
+                        radius_sq_ = new_ped;
+                        // 继续枚举该层下一个候选
+                        ++idx[k];
+                        continue;
+                    }
+                    else
+                    {
+                        // 下降到下一层 k-1
+                        --k;
+                        idx[k] = 0;
+                        order[k].clear(); // 触发重新构造该层枚举次序 (partial_sum 已改变)
+                        continue;
+                    }
+                }
+                else
+                {
+                    // 剪枝：尝试下一个候选
+                    ++idx[k];
+                    continue;
+                }
+            }
+            else
+            {
+                // 本层枚举完毕，回溯
+                if (k == static_cast<int>(N) - 1)
+                {
+                    // 顶层也完成，搜索结束
+                    break;
+                }
+                else
+                {
+                    ++k;               // 回到上一层
+                    ++idx[k];          // 上一层继续枚举下一个符号
+                    continue;
+                }
+            }
+        }
+    }
+};
 
 
 

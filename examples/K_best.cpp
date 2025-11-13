@@ -30,9 +30,9 @@ struct ThreadResult {
 int main(int argc, char* argv[]) {
     int max_sample = 10000000;  // 最大样本数防止无限循环
     int err_frame_threshold = 1000;  // 错误帧阈值
-    int snr_start = 24;  // Default start SNR
-    int snr_end = 24;    // Default end SNR
-    int snr_step = 1;    // Default SNR step size
+    int snr_start = 26;  // Default start SNR
+    int snr_end = 26;    // Default end SNR
+    int snr_step = 2;    // Default SNR step size
     unsigned int seed = 114514;
 
     if (argc > 1) max_sample = atoi(argv[1]);
@@ -66,7 +66,7 @@ int main(int argc, char* argv[]) {
             Kito::set_random_seed(thread_seed);
             auto det = Detection<Rx<RxAntNum>, Tx<TxAntNum>, Mod<QAM>>();
             det.setSNR(snr);  // Use current SNR value
-            auto tree = Kito::KBest<decltype(det),K>();
+            auto tree = Kito::SphereDecoder<decltype(det)>();
             
             ThreadResult local;
             int local_count = 0;
