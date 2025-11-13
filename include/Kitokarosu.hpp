@@ -1982,6 +1982,8 @@ public:
     R_type R;
     Z_type z;
 
+    size_t nodes;
+
 private:
     // 内部成员变量，用于搜索过程
     PrecType radius_sq_; // 当前搜索半径的平方
@@ -1997,6 +1999,7 @@ public:
 
     auto run(const Detection &det)
     {
+        nodes = 0;
         initializeQR(det);
         findInitialRadius();
         search();
@@ -2133,6 +2136,8 @@ private:
                 // 再次使用增量和来计算差值
                 PrecType diff = z(k) - partial_sums_incremental_(k) - R(k, k) * symbol;
                 PrecType new_ped = ped[k + 1] + diff * diff;
+
+                nodes++;
 
                 if (new_ped < radius_sq_)
                 {
