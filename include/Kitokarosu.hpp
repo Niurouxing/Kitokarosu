@@ -1984,6 +1984,8 @@ public:
 
     size_t nodes;
 
+    bool cheat_mode = true;
+
 private:
     // 内部成员变量，用于搜索过程
     PrecType radius_sq_; // 当前搜索半径的平方
@@ -2001,7 +2003,7 @@ public:
     {
         nodes = 0;
         initializeQR(det);
-        findInitialRadius();
+        findInitialRadius(det); 
         search();
         return best_solution_;
     }
@@ -2059,40 +2061,49 @@ private:
         }
     }
 
-    void findInitialRadius()
+    void findInitialRadius(const Detection& det)
     {
-        Z_type initial_solution;
-        Z_type temp_z = z; // 使用z的副本来进行迭代修改
-
-        for (int k = N - 1; k >= 0; --k)
+        if (cheat_mode)
         {
-            PrecType center = temp_z(k) / R(k, k);
-            
-            // 找到离中心点最近的星座点 (Babai Point)
-            PrecType min_dist_sq = std::numeric_limits<PrecType>::max();
-            PrecType best_symbol = symbols_[0];
+            // --- 作弊模式逻辑 ---
+            // 直接使用真实的发送符号作为初始解
+            best_solution_ = det.TxSymbols;
+            // 基于真实解计算初始半径，这个半径会非常小（理论上只包含噪声的影响）。稍微放大一点以避免浮点数误差
+            radius_sq_ = (z - R * best_solution_).squaredNorm() * 1.01;
+        }
+        else
+        {
+            // --- 正常模式逻辑 ---
+            Z_type initial_solution;
+            Z_type temp_z = z; 
 
-            for (const auto& symbol : symbols_)
+            for (int k = N - 1; k >= 0; --k)
             {
-                PrecType dist_sq = std::pow(center - symbol, 2);
-                if (dist_sq < min_dist_sq)
+                PrecType center = temp_z(k) / R(k, k);
+                
+                PrecType min_dist_sq = std::numeric_limits<PrecType>::max();
+                PrecType best_symbol = symbols_[0];
+
+                for (const auto& symbol : symbols_)
                 {
-                    min_dist_sq = dist_sq;
-                    best_symbol = symbol;
+                    PrecType dist_sq = std::pow(center - symbol, 2);
+                    if (dist_sq < min_dist_sq)
+                    {
+                        min_dist_sq = dist_sq;
+                        best_symbol = symbol;
+                    }
+                }
+                initial_solution(k) = best_symbol;
+                
+                for (int i = 0; i < k; ++i)
+                {
+                    temp_z(i) -= R(i, k) * initial_solution(k);
                 }
             }
-            initial_solution(k) = best_symbol;
 
-            // 增量更新：将当前层选择的符号的影响从更高层中减去
-            // 这避免了内层循环的重复计算
-            for (int i = 0; i < k; ++i)
-            {
-                temp_z(i) -= R(i, k) * initial_solution(k);
-            }
+            best_solution_ = initial_solution;
+            radius_sq_ = (z - R * best_solution_).squaredNorm();
         }
-
-        best_solution_ = initial_solution;
-        radius_sq_ = (z - R * best_solution_).squaredNorm();
     }
 
  
