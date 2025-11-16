@@ -1960,6 +1960,7 @@ public:
 };
 
 
+
 template <typename Detection>
 class SphereDecoder
 {
@@ -1975,89 +1976,101 @@ public:
     inline static constexpr bool heapAlloc = TxAntNum * RxAntNum >= 64 * 64;
     using R_type = std::conditional_t<heapAlloc,
                                       Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>,
-                                      Eigen::Matrix<PrecType, 2 * TxAntNum, 2 * TxAntNum>>;
-
+                                      Eigen::Matrix<PrecType, N, N>>;
     using Z_type = Eigen::Matrix<PrecType, N, 1>;
+    // 使用Eigen的PermutationMatrix来处理列交换
+    using P_type = Eigen::PermutationMatrix<N, N>;
+
 
     R_type R;
     Z_type z;
+    P_type P_; // 存储最优排序的置换矩阵
 
     size_t nodes;
-
     bool cheat_mode = true;
 
 private:
     // 内部成员变量，用于搜索过程
-    PrecType radius_sq_; // 当前搜索半径的平方
-    Eigen::Matrix<PrecType, N, 1> best_solution_; // 存储找到的最佳解
-    Eigen::Matrix<PrecType, N, 1> current_path_; // 存储DFS过程中的当前路径
-    const decltype(QAM::symbolsRD)& symbols_; // 星座点引用
+    PrecType radius_sq_;
+    Eigen::Matrix<PrecType, N, 1> best_solution_; // 存储找到的最佳解 (在置换域)
+    Eigen::Matrix<PrecType, N, 1> current_path_;
+    const decltype(QAM::symbolsRD)& symbols_;
     Z_type partial_sums_incremental_;
 
 public:
     // 构造函数
     SphereDecoder() : symbols_(QAM::symbolsRD) {}
 
-
     auto run(const Detection &det)
     {
         nodes = 0;
-        initializeQR(det);
+        // 核心优化：执行两阶段QR分解来找到并应用最优排序
+        initializePermutedQR(det);
         findInitialRadius(det); 
         search();
-        return best_solution_;
+        // 关键：返回结果前，需要将解从置换域逆置换回原始域
+        return P_ * best_solution_;
     }
 
 private:
     /**
-     * @brief 对信道矩阵H进行QR分解，得到上三角矩阵R和向量z
+     * @brief 执行两阶段QR分解以实现基于真实噪声的“神谕排序”。
+     *        取代了原有的 initializeQR 函数。
      */
-    void initializeQR(const Detection &det)
+    void initializePermutedQR(const Detection &det)
     {
-        auto &H = det.H;
-        // QR分解
-        if constexpr (TxAntNum == RxAntNum)
-        {
-            // no need to slice Q and R in such scenario
-            if constexpr  (heapAlloc)
-            {
-                Eigen::HouseholderQR<Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>> qr(H);
+        // --- 阶段 1: 第一次QR，目的是计算可靠性度量 ---
+        
+        // 1a. 对原始 H 进行标准QR分解
+        Eigen::HouseholderQR<typename Detection::H_type> qr1(det.H);
+        R_type R1 = qr1.matrixQR().template triangularView<Eigen::Upper>();
+        auto Q1 = qr1.householderQ();
 
-                R = qr.matrixQR().template triangularView<Eigen::Upper>();
-                z = qr.householderQ().transpose() * det.RxSymbols;
-            }
-            else
-            {
-                Eigen::HouseholderQR<Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>> qr(H);
-
-                R = qr.matrixQR().template triangularView<Eigen::Upper>();
-                z = qr.householderQ().transpose() * det.RxSymbols;
-            }
+        // 在 Rx > Tx 的情况下，R1需要被截断以保持方阵
+        if constexpr (RxAntNum > TxAntNum) {
+            R1 = R1.topRows(N);
         }
-        else
-        {
-            if constexpr (heapAlloc)
-            {
-                Eigen::HouseholderQR<Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>> qr(H);
-                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> bQ = qr.householderQ();
-                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> bR = qr.matrixQR().template triangularView<Eigen::Upper>();
 
-                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> Q = bQ.leftCols(2 * TxAntNum);
-                R = bR.topRows(2 * TxAntNum);
+        // 1b. 计算真实噪声并变换到Q域
+        Z_type true_noise = det.RxSymbols - det.H * det.TxSymbols;
+        Z_type n_prime = (Q1.transpose() * true_noise).head(N);
 
-                z = (Q.transpose() * det.RxSymbols);
-            }
-            else
-            {
-                Eigen::HouseholderQR<Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>> qr(H);
-                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * RxAntNum> bQ = qr.householderQ();
-                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum> bR = qr.matrixQR().template triangularView<Eigen::Upper>();
+        // 1c. 计算每个符号的可靠性度量
+        std::vector<std::pair<PrecType, int>> metrics(N);
+        for (int k = 0; k < N; ++k) {
+            // 度量是误差项的大小。值越小，符号越可靠。
+            // 加上一个很小的数防止除以零
+            metrics[k] = {std::abs(n_prime(k) / (R1(k, k) + 1e-12)), k};
+        }
 
-                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum> Q = bQ.leftCols(2 * TxAntNum);
-                R = bR.topRows(2 * TxAntNum);
+        // --- 阶段 2: 排序并执行第二次QR ---
 
-                z = (Q.transpose() * det.RxSymbols);
-            }
+        // 2a. 对度量进行排序，最可靠的（值最小的）排在最前面
+        std::sort(metrics.begin(), metrics.end());
+
+        // 2b. 构建置换矩阵P_。
+        // 我们希望最可靠的符号最后解码（即在回溯时最先处理，索引为N-1）。
+        // Eigen的PermutationMatrix构造函数需要一个索引向量，其中perm_indices(i)是移动到位置i的原始列的索引。
+        Eigen::Vector<int, N> perm_indices;
+        for (int j = 0; j < N; ++j) {
+            // 将第j个最可靠的符号（原始索引为metrics[j].second）
+            // 移动到新的索引 (N - 1 - j) 的位置。
+            perm_indices(N - 1 - j) = metrics[j].second;
+        }
+        P_ = P_type(perm_indices);
+
+        // 2c. 应用置换并执行第二次QR分解
+        typename Detection::H_type H_permuted = det.H * P_;
+        Eigen::HouseholderQR<typename Detection::H_type> qr2(H_permuted);
+
+        // 将最终的 R 和 z 存储到类成员中
+        R = qr2.matrixQR().template triangularView<Eigen::Upper>();
+        z = qr2.householderQ().transpose() * det.RxSymbols;
+        
+        // 同样，处理 Rx > Tx 的情况
+        if constexpr (RxAntNum > TxAntNum) {
+            R = R.topRows(N);
+            z = z.head(N);
         }
     }
 
@@ -2066,14 +2079,20 @@ private:
         if (cheat_mode)
         {
             // --- 作弊模式逻辑 ---
-            // 直接使用真实的发送符号作为初始解
-            best_solution_ = det.TxSymbols;
-            // 基于真实解计算初始半径，这个半径会非常小（理论上只包含噪声的影响）。稍微放大一点以避免浮点数误差
+            // 对真实的发送符号进行同样的置换，以匹配排序后的信道
+            Z_type permuted_tx_symbols = P_.transpose() * det.TxSymbols;
+
+            // 初始最佳解是在置换域中的解
+            best_solution_ = permuted_tx_symbols;
+            
+            // 基于置换后的真实解计算初始半径
+            // 注意：这里的 z 和 R 是第二次QR分解的结果
             radius_sq_ = (z - R * best_solution_).squaredNorm() * 1.01;
         }
         else
         {
-            // --- 正常模式逻辑 ---
+            // --- 正常模式逻辑 (也需要工作在置换域) ---
+            // 正常模式的ZF-SIC（或其他）初始解也应该在排序后的 H_p 上进行
             Z_type initial_solution;
             Z_type temp_z = z; 
 
@@ -2107,14 +2126,12 @@ private:
     }
 
  
-    // 非递归深度优先搜索 (Schnorr-Euchner 枚举)
     void search()
     {
         std::vector<std::vector<int>> order(N);
         std::vector<int> idx(N, 0);
         std::vector<PrecType> ped(N + 1, PrecType(0));
         
-        // 初始化增量更新向量
         partial_sums_incremental_.setZero();
 
         int k = static_cast<int>(N) - 1;
@@ -2123,7 +2140,6 @@ private:
         {
             if (order[k].empty())
             {
-                // 使用预先计算的增量和
                 PrecType center = (z(k) - partial_sums_incremental_(k)) / R(k, k);
 
                 std::vector<std::pair<int, PrecType>> tmp; 
@@ -2144,7 +2160,6 @@ private:
                 int si = order[k][idx[k]];
                 PrecType symbol = symbols_[si];
                 
-                // 再次使用增量和来计算差值
                 PrecType diff = z(k) - partial_sums_incremental_(k) - R(k, k) * symbol;
                 PrecType new_ped = ped[k + 1] + diff * diff;
 
@@ -2163,7 +2178,6 @@ private:
                     }
                     else
                     {
-                        // 向下移动，增量更新 partial_sums
                         for (int i = 0; i < k; ++i) {
                             partial_sums_incremental_(i) += R(i, k) * current_path_(k);
                         }
@@ -2186,8 +2200,6 @@ private:
                 else
                 {
                     ++k;
-                    // 撤销上一层(k-1)选择的符号 current_path(k) 的影响
-                    // 注意：此时的k已经+1，所以上一层的索引是k
                     for (int i = 0; i < k; ++i) {
                          partial_sums_incremental_(i) -= R(i, k) * current_path_(k);
                     }
@@ -2197,7 +2209,6 @@ private:
         }
     }
 };
-
 
 
 
