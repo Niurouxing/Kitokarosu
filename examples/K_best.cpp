@@ -21,10 +21,13 @@ using Kito::Detection;
 using Kito::Mod;
 using Kito::Rx;
 using Kito::Tx;
+using Kito::SER;
+using Kito::BER;
 
 struct ThreadResult {
     long long err_frames = 0; 
     long long err_bits = 0;
+    long long err_symbols = 0;
     uint64_t total_size = 0;
     long long processed = 0;    
 };
@@ -50,6 +53,7 @@ int main(int argc, char* argv[]) {
     
     std::vector<int> snr_values;
     std::vector<double> ber_values;
+    std::vector<double> ser_values;
     std::vector<double> avg_list_size_values;
 
     for (int snr = snr_start; snr <= snr_end; snr += snr_step) {
@@ -57,6 +61,7 @@ int main(int argc, char* argv[]) {
         std::atomic<long long> global_progress(0);
         std::atomic<long long> global_err_frames(0);
         std::atomic<long long> global_err_bits(0);
+        std::atomic<long long> global_err_symbols(0);
         std::atomic<uint64_t> global_total_size(0);
         std::atomic<bool> should_stop(false);
 
@@ -75,10 +80,11 @@ int main(int argc, char* argv[]) {
                    global_progress.load(std::memory_order_relaxed) < max_sample) {
                 det.generate();
                 auto list = tree.run(det);
-                auto err = det.judge(list);
+                auto [ser_cnt, ber_cnt] = det.judge<SER, BER>(list);
 
-                local.err_frames += (err > 0);
-                local.err_bits += err;
+                local.err_frames += ((ser_cnt > 0) || (ber_cnt > 0));
+                local.err_bits += ber_cnt;
+                local.err_symbols += ser_cnt;
                 local.total_size += tree.nodes;
                 local.processed++;
                 local_count++;
@@ -88,6 +94,7 @@ int main(int argc, char* argv[]) {
                     long long new_err_frames = global_err_frames.fetch_add(local.err_frames, std::memory_order_relaxed) + local.err_frames;
                     global_err_bits.fetch_add(local.err_bits, std::memory_order_relaxed);
                     global_total_size.fetch_add(local.total_size, std::memory_order_relaxed);
+                    global_err_symbols.fetch_add(local.err_symbols, std::memory_order_relaxed);
                     local = ThreadResult();
                     local_count = 0;
 
@@ -102,6 +109,7 @@ int main(int argc, char* argv[]) {
             global_err_frames.fetch_add(local.err_frames, std::memory_order_relaxed);
             global_err_bits.fetch_add(local.err_bits, std::memory_order_relaxed);
             global_total_size.fetch_add(local.total_size, std::memory_order_relaxed);
+            global_err_symbols.fetch_add(local.err_symbols, std::memory_order_relaxed);
         };
 
         auto start = std::chrono::high_resolution_clock::now();
@@ -119,14 +127,17 @@ int main(int argc, char* argv[]) {
                     const long long progress = global_progress.load(std::memory_order_relaxed);
                     const long long ef = global_err_frames.load(std::memory_order_relaxed);
                     const long long eb = global_err_bits.load(std::memory_order_relaxed);
-                    const uint64_t ts = global_total_size.load(std::memory_order_relaxed);
+                        const uint64_t ts = global_total_size.load(std::memory_order_relaxed);
+                        const long long es = global_err_symbols.load(std::memory_order_relaxed);
                     
                     if (progress > 0) {
                         double current_ber = static_cast<double>(eb) / (progress * TxAntNum * QAM::bitLength);
+                        double current_ser = static_cast<double>(es) / (progress * 2 * TxAntNum);
                         double current_avg_list_size = static_cast<double>(ts) / progress / TxAntNum / 2 / QAM::symbolsRD.size();
                         std::cout << "SNR " << snr << "dB - Samples: " << progress 
                                 << "  ErrFrames: " << ef << "/" << err_frame_threshold
-                                << "  BER: " << std::scientific << current_ber // 使用科学计数法显示BER
+                            << "  BER: " << std::scientific << current_ber // 使用科学计数法显示BER
+                            << "  SER: " << std::scientific << current_ser
                                 << "  AvgListSize: " << std::fixed << current_avg_list_size
                                 << "\r";
                         std::cout.flush();
@@ -144,13 +155,16 @@ int main(int argc, char* argv[]) {
         const long long progress = global_progress.load(std::memory_order_relaxed);
         const long long ef = global_err_frames.load(std::memory_order_relaxed);
         const long long eb = global_err_bits.load(std::memory_order_relaxed);
+        const long long es = global_err_symbols.load(std::memory_order_relaxed);
         const uint64_t ts = global_total_size.load(std::memory_order_relaxed);
         
         double ber = (progress > 0) ? static_cast<double>(eb) / (progress * TxAntNum * QAM::bitLength) : 0.0;
+        double ser = (progress > 0) ? static_cast<double>(es) / (progress * 2 * TxAntNum) : 0.0;
         double avgListSize = (progress > 0) ? static_cast<double>(ts) / progress / TxAntNum / 2 / QAM::symbolsRD.size() : 0.0;
         
         snr_values.push_back(snr);
         ber_values.push_back(ber);
+        ser_values.push_back(ser);
         avg_list_size_values.push_back(avgListSize);
         
         // 清除进度行，然后打印最终结果
@@ -158,6 +172,7 @@ int main(int argc, char* argv[]) {
         std::cout << "SNR " << snr << "dB - Samples: " << progress 
                 << "  ErrFrames: " << ef << "/" << err_frame_threshold
                 << "  BER: " << std::scientific << ber
+            << "  SER: " << std::scientific << ser
                 << "  AvgListSize: " << std::fixed << avgListSize
                 << std::endl;
 
@@ -179,6 +194,12 @@ int main(int argc, char* argv[]) {
     std::cout << "BER values: [";
     for (size_t i = 0; i < ber_values.size(); i++) {
         std::cout << std::scientific << std::setprecision(6) << ber_values[i] << (i < ber_values.size() - 1 ? ", " : "");
+    }
+    std::cout << "]\n";
+
+    std::cout << "SER values: [";
+    for (size_t i = 0; i < ser_values.size(); i++) {
+        std::cout << std::scientific << std::setprecision(6) << ser_values[i] << (i < ser_values.size() - 1 ? ", " : "");
     }
     std::cout << "]\n";
     

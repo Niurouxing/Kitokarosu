@@ -11,6 +11,8 @@
 #include <numeric>
 #include <ranges>
 #include <span>
+#include <tuple>
+#include <utility>
 
 
 namespace Kito{
@@ -1231,6 +1233,9 @@ struct Tx
     static constexpr size_t value = N;
 };
 
+struct BER {}; // 计算比特错误率的标签
+struct SER {}; // 计算符号错误率的标签
+
 template< typename Prec>
 struct QAM16
 {
@@ -1394,40 +1399,92 @@ public:
         generateRx();
     }
 
-    template <typename T>
-        requires  (!FirstElementIsIntegral<T>)
-    inline auto judge(T &symbolsEst)
+private:
+    template<typename Metric>
+    static size_t calculate_metric(size_t estimated_index, size_t true_index)
     {
-
-        thread_local std::array<size_t, 2 * TxAntNum> wrongBits;
-
-        std::transform(
-            symbolsEst.begin(), symbolsEst.end(), TxIndices.begin(),
-            wrongBits.begin(), [](auto symbol, size_t index) {
-                auto closest = std::min_element(symbolsRD.begin(), symbolsRD.end(),
-                                                [symbol](auto x, auto y) {
-                                                    return std::abs(x - symbol) <
-                                                           std::abs(y - symbol);
-                                                }) -
-                               symbolsRD.begin();
-                return std::bitset<ModType::bitLength>(closest ^ index).count();
-            });
-
-        return std::accumulate(wrongBits.begin(), wrongBits.end(), 0);
+        constexpr size_t bits_per_rdsymbol = ModType::bitLength / 2;
+        if constexpr (std::is_same_v<Metric, BER>) {
+            return std::bitset<bits_per_rdsymbol>(estimated_index ^ true_index).count();
+        } else if constexpr (std::is_same_v<Metric, SER>) {
+            return (estimated_index != true_index) ? 1 : 0;
+        } else {
+            static_assert(std::is_same_v<Metric, void>, "Unsupported metric type passed to judge");
+            return 0;
+        }
     }
 
+    template <typename... Metrics, typename T>
+    auto _judge_impl(const T& indicesEst)
+    {
+        static_assert(sizeof...(Metrics) > 0, "At least one metric must be specified");
+
+        using result_tuple_t = std::tuple<decltype(calculate_metric<Metrics>(0, 0))...>;
+        result_tuple_t totals{};
+
+        constexpr auto N = sizeof...(Metrics);
+        using index_seq = std::make_index_sequence<N>;
+
+        for (size_t i = 0; i < indicesEst.size(); ++i) {
+            const size_t estimated_index = static_cast<size_t>(indicesEst[i]);
+            const size_t true_index      = static_cast<size_t>(TxIndices[i]);
+
+            [&]<std::size_t... I>(std::index_sequence<I...>) {
+                ((std::get<I>(totals) += calculate_metric<
+                        std::tuple_element_t<I, std::tuple<Metrics...>>
+                    >(estimated_index, true_index)), ...);
+            }(index_seq{});
+        }
+
+        if constexpr (N == 1) {
+            return std::get<0>(totals);
+        } else {
+            return totals;
+        }
+    }
+
+public:
+    // 默认：浮点符号输入，返回 BER（保持向后兼容）
+    template <typename T>
+        requires  (!FirstElementIsIntegral<T>)
+    inline size_t judge(T &symbolsEst)
+    {
+        return this->template judge<BER>(symbolsEst);
+    }
+
+    // 可变参数模板：浮点符号输入
+    template <typename... Metrics, typename T>
+        requires  (!FirstElementIsIntegral<T>) && (sizeof...(Metrics) > 0)
+    inline auto judge(T &symbolsEst)
+    {
+        thread_local std::array<size_t, 2 * TxAntNum> estimated_indices;
+
+        std::transform(symbolsEst.begin(), symbolsEst.end(), estimated_indices.begin(),
+            [this](auto symbol) {
+                auto closest_it = std::min_element(symbolsRD.begin(), symbolsRD.end(),
+                                                [symbol](auto x, auto y) {
+                                                    return std::abs(x - symbol) < std::abs(y - symbol);
+                                                });
+                return static_cast<size_t>(std::distance(symbolsRD.begin(), closest_it));
+            });
+
+        return _judge_impl<Metrics...>(estimated_indices);
+    }
+
+    // 默认：整数索引输入，返回 BER（保持向后兼容）
     template <typename T>
         requires  (FirstElementIsIntegral<T>)
-    inline auto judge(T &bitsEst)
+    inline size_t judge(T &indicesEst)
     {
-        thread_local std::array<size_t, 2 * TxAntNum> wrongBits;
+        return this->template judge<BER>(indicesEst);
+    }
 
-        std::transform(bitsEst.begin(), bitsEst.end(), TxIndices.begin(),
-                       wrongBits.begin(), [](auto bits, size_t index) {
-                           return std::bitset<ModType::bitLength>(bits ^ index).count();
-                       });
-
-        return std::accumulate(wrongBits.begin(), wrongBits.end(), 0);
+    // 可变参数模板：整数索引输入
+    template <typename... Metrics, typename T>
+        requires  (FirstElementIsIntegral<T>) && (sizeof...(Metrics) > 0)
+    inline auto judge(T &indicesEst)
+    {
+        return _judge_impl<Metrics...>(indicesEst);
     }
 };
 
