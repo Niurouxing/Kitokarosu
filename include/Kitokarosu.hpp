@@ -1233,8 +1233,39 @@ struct Tx
     static constexpr size_t value = N;
 };
 
-struct BER {}; // 计算比特错误率的标签
-struct SER {}; // 计算符号错误率的标签
+
+struct BER {
+    template <size_t Bits>
+    static inline size_t per_symbol(size_t estimated_index, size_t true_index) {
+        return std::bitset<Bits>(estimated_index ^ true_index).count();
+    }
+    static inline size_t reduce(size_t sum) {
+        return sum;
+    }
+};
+
+struct SER {
+    template <size_t Bits>
+    static inline size_t per_symbol(size_t estimated_index, size_t true_index) {
+        return (estimated_index != true_index) ? 1 : 0;
+    }
+    static inline size_t reduce(size_t sum) {
+        return sum;
+    }
+};
+
+// 新增 FER 标签
+struct FER {
+    template <size_t Bits>
+    static inline size_t per_symbol(size_t estimated_index, size_t true_index) {
+        // 与 SER 相同，先逐符号计 0/1
+        return (estimated_index != true_index) ? 1 : 0;
+    }
+    static inline size_t reduce(size_t sum) {
+        // 帧级：该帧内任意符号出错则记为 1，否则 0
+        return (sum > 0) ? 1 : 0;
+    }
+};
 
 template< typename Prec>
 struct QAM16
@@ -1400,49 +1431,41 @@ public:
     }
 
 private:
-    template<typename Metric>
-    static size_t calculate_metric(size_t estimated_index, size_t true_index)
-    {
-        constexpr size_t bits_per_rdsymbol = ModType::bitLength / 2;
-        if constexpr (std::is_same_v<Metric, BER>) {
-            return std::bitset<bits_per_rdsymbol>(estimated_index ^ true_index).count();
-        } else if constexpr (std::is_same_v<Metric, SER>) {
-            return (estimated_index != true_index) ? 1 : 0;
-        } else {
-            static_assert(std::is_same_v<Metric, void>, "Unsupported metric type passed to judge");
-            return 0;
-        }
-    }
-
     template <typename... Metrics, typename T>
     auto _judge_impl(const T& indicesEst)
     {
         static_assert(sizeof...(Metrics) > 0, "At least one metric must be specified");
 
-        using result_tuple_t = std::tuple<decltype(calculate_metric<Metrics>(0, 0))...>;
-        result_tuple_t totals{};
-
+        constexpr size_t Bits = ModType::bitLength / 2;
         constexpr auto N = sizeof...(Metrics);
         using index_seq = std::make_index_sequence<N>;
+
+        using sums_tuple_t = std::tuple<decltype(Metrics::template per_symbol<Bits>(0, 0))...>;
+        sums_tuple_t sums{}; // 按度量逐项累加（逐符号）
 
         for (size_t i = 0; i < indicesEst.size(); ++i) {
             const size_t estimated_index = static_cast<size_t>(indicesEst[i]);
             const size_t true_index      = static_cast<size_t>(TxIndices[i]);
 
             [&]<std::size_t... I>(std::index_sequence<I...>) {
-                ((std::get<I>(totals) += calculate_metric<
-                        std::tuple_element_t<I, std::tuple<Metrics...>>
-                    >(estimated_index, true_index)), ...);
+                ((std::get<I>(sums) +=
+                    std::tuple_element_t<I, std::tuple<Metrics...>>::template per_symbol<Bits>(
+                        estimated_index, true_index)), ...);
             }(index_seq{});
         }
 
         if constexpr (N == 1) {
-            return std::get<0>(totals);
+            using M0 = std::tuple_element_t<0, std::tuple<Metrics...>>;
+            return M0::reduce(std::get<0>(sums));
         } else {
-            return totals;
+            return [&]<std::size_t... I>(std::index_sequence<I...>) {
+                return std::make_tuple(
+                    std::tuple_element_t<I, std::tuple<Metrics...>>::reduce(std::get<I>(sums))...
+                );
+            }(index_seq{});
         }
     }
-
+ 
 public:
     // 默认：浮点符号输入，返回 BER（保持向后兼容）
     template <typename T>
