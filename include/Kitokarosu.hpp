@@ -2054,7 +2054,9 @@ public:
     static constexpr size_t N = 2 * TxAntNum;            // 实数域维度
     static constexpr size_t slen = QAM::symbolsRD.size(); // 每个实数维度的星座点数
 
-    static constexpr bool heapAlloc = TxAntNum * RxAntNum >= 64 * 64;
+    // run() 内同时存在多个 N×N 矩阵 (HtH_over_Nv, Sigma_q, A, 逆矩阵临时量)
+    // 保守地限制单个 N×N 矩阵不超过 32KB，从而 ~4 个矩阵不超出 Eigen 128KB 栈限制
+    static constexpr bool heapAlloc = (N * N * sizeof(PrecType)) > 32768;
 
     using VectorN  = Eigen::Matrix<PrecType, N, 1>;
     using MatrixNN = std::conditional_t<heapAlloc,
