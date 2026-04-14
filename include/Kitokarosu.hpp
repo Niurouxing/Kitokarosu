@@ -2040,6 +2040,180 @@ public:
 };
 
 
+// ------------------- EP (Expectation Propagation) -------------------
+
+template <typename Detection, size_t IterNum = 10>
+class EP
+{
+public:
+    using QAM = typename Detection::ModType;
+    using PrecType = typename Detection::PrecType;
+
+    static constexpr auto TxAntNum = Detection::TxAntNum;
+    static constexpr auto RxAntNum = Detection::RxAntNum;
+    static constexpr size_t N = 2 * TxAntNum;            // 实数域维度
+    static constexpr size_t slen = QAM::symbolsRD.size(); // 每个实数维度的星座点数
+
+    static constexpr bool heapAlloc = TxAntNum * RxAntNum >= 64 * 64;
+
+    using VectorN  = Eigen::Matrix<PrecType, N, 1>;
+    using MatrixNN = std::conditional_t<heapAlloc,
+                                        Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>,
+                                        Eigen::Matrix<PrecType, N, N>>;
+    // N x slen 概率矩阵（各行对应天线维度，各列对应星座点）
+    using MatrixNS = std::conditional_t<heapAlloc,
+                                        Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>,
+                                        Eigen::Matrix<PrecType, N, slen>>;
+    // slen 长度的行向量 / 列向量
+    using VectorS  = Eigen::Matrix<PrecType, slen, 1>;
+
+    // 阻尼因子（运行时可调）
+    PrecType delta = static_cast<PrecType>(0.7);
+
+    auto run(const Detection& det)
+    {
+        const auto& H  = det.H;
+        const auto& y  = det.RxSymbols;
+        const PrecType Nv = static_cast<PrecType>(det.Nv);
+
+        // 星座符号向量（编译期常量 → 运行期 Eigen 向量）
+        const auto sym = Eigen::Map<const VectorS>(QAM::symbolsRD.data());
+        // sym^2
+        const VectorS sym2 = sym.array().square();
+
+        // --- 初始化 ---
+        VectorN Alpha     = VectorN::Constant(static_cast<PrecType>(2));
+        VectorN Gamma     = VectorN::Zero();
+        VectorN Alpha_new = VectorN::Zero();
+        VectorN Gamma_new = VectorN::Zero();
+
+        // 预计算 H^T H / Nv 和 H^T y / Nv（不随迭代改变）
+        MatrixNN HtH_over_Nv;
+        VectorN  Hty_over_Nv;
+        if constexpr (heapAlloc)
+            HtH_over_Nv.resize(N, N);
+        HtH_over_Nv.noalias() = H.transpose() * H / Nv;
+        Hty_over_Nv.noalias() = H.transpose() * y / Nv;
+
+        // 后验分布参数
+        MatrixNN Sigma_q;
+        VectorN  Mu_q;
+        if constexpr (heapAlloc)
+            Sigma_q.resize(N, N);
+
+        // 概率矩阵 prob(N, slen)
+        MatrixNS prob;
+        if constexpr (heapAlloc)
+            prob.resize(N, slen);
+
+        // 计算后验分布（复用于初始化和每次迭代末尾）
+        auto computePosterior = [&]()
+        {
+            MatrixNN A = HtH_over_Nv;
+            A.diagonal() += Alpha;
+            Sigma_q = A.inverse();
+            Mu_q.noalias() = Sigma_q * (Hty_over_Nv + Gamma);
+        };
+
+        // 以 MMSE 结果作为预处理
+        computePosterior();
+
+        constexpr PrecType var_floor   = static_cast<PrecType>(5e-7);
+        constexpr PrecType alpha_floor = static_cast<PrecType>(5e-7);
+
+        // --- EP 迭代 ---
+        for (size_t iter = 0; iter < IterNum; ++iter)
+        {
+            // ---- 腔分布参数（全向量化） ----
+            const VectorN sig = Sigma_q.diagonal();
+            const VectorN h2  = sig.array() / (static_cast<PrecType>(1) - sig.array() * Alpha.array());
+            const VectorN t   = h2.array() * (Mu_q.array() / sig.array() - Gamma.array());
+
+            // ---- 概率矩阵 prob(N, slen) = exp(-(t - sym')^2 / (2*h2)) ----
+            // diff(i,j) = t(i) - sym(j)   →  t * 1^T - 1 * sym^T
+            // prob(i,j) = -diff^2 / (2*h2(i))
+            //  = -(t(i)-sym(j))^2 / (2*h2(i))
+            // 先构造平方距离矩阵，再按行除以 2*h2
+            //   dist2 = (t * ones^T - ones * sym^T).^2
+            // 利用展开:  (t-s)^2 = t^2 - 2*t*s + s^2
+            //   dist2 = t^2*1^T - 2*t*sym^T + 1*sym2^T
+            const VectorN t2  = t.array().square();
+            const VectorN inv2h2 = (static_cast<PrecType>(2) * h2.array()).inverse();
+
+            // prob(i,j) = -(t2(i) - 2*t(i)*sym(j) + sym2(j)) / (2*h2(i))
+            // 展开为三个 rank-1 项，避免显式构造 N×slen 的差矩阵
+            // term1(i,j) = -t2(i) * inv2h2(i)                (仅与 i 有关)
+            // term2(i,j) =  2*t(i)*inv2h2(i) * sym(j) = tinv(i)*sym(j)
+            // term3(i,j) = -sym2(j) * inv2h2(i)              (外积)
+            const VectorN c1   = (-t2.array() * inv2h2.array()).matrix();     // N×1
+            const VectorN tinv = (t.array() * inv2h2.array()).matrix();       // N×1  (已含 *2 因为 inv2h2 = 1/(2h2))
+            // prob = c1*1^T + tinv*sym^T*2  − inv2h2*sym2^T   ... 但 tinv 已含 /2h2
+            // 直接用矩阵运算一步构造:
+            //   prob = c1 * ones_row  +  2 * tinv * sym^T  -  inv2h2 * sym2^T
+            // 但 tinv = t/(2h2)，需要 2*tinv = t/h2
+            // 重新整理，最清晰的做法：
+            //   logP(i,j) = -inv2h2(i) * (t(i) - sym(j))^2
+            //             = -inv2h2(i)*t2(i) + 2*inv2h2(i)*t(i)*sym(j) - inv2h2(i)*sym2(j)
+            // 写成矩阵：  logP = c1*1^T + (2*tinv)*sym^T - inv2h2*sym2^T
+            const VectorN tinv2 = (static_cast<PrecType>(2) * tinv.array()).matrix();
+
+            prob.noalias() = c1.replicate(1, slen)
+                           + tinv2 * sym.transpose()
+                           - inv2h2 * sym2.transpose();
+
+            // log-sum-exp 数值稳定化：每行减去行最大值
+            const VectorN row_max = prob.rowwise().maxCoeff();
+            prob.colwise() -= row_max;
+
+            // exp 与行归一化
+            prob = prob.array().exp();
+            const VectorN row_sum = prob.rowwise().sum();
+            prob.array().colwise() /= row_sum.array();
+
+            // ---- 替代分布的均值和方差（矩阵-向量乘法） ----
+            // mu_p     = prob * sym         (N×1)
+            // sigma2_p = prob * sym2 - mu_p^2
+            const VectorN mu_p     = (prob * sym);
+            VectorN sigma2_p       = (prob * sym2) - mu_p.array().square().matrix();
+            sigma2_p = sigma2_p.cwiseMax(var_floor);
+
+            // ---- 自然参数更新（全向量化） ----
+            const VectorN tempAlpha = sigma2_p.array().inverse() - h2.array().inverse();
+            const VectorN tempGamma = mu_p.array() / sigma2_p.array() - t.array() / h2.array();
+
+            // 仅更新精度为正的分量 (向量化选择)
+            const auto mask = (tempAlpha.array() > alpha_floor);
+            Alpha_new = mask.select(tempAlpha, Alpha_new);
+            Gamma_new = mask.select(tempGamma, Gamma_new);
+
+            // 阻尼
+            Alpha = delta * Alpha_new + (static_cast<PrecType>(1) - delta) * Alpha;
+            Gamma = delta * Gamma_new + (static_cast<PrecType>(1) - delta) * Gamma;
+
+            // 更新后验
+            computePosterior();
+        }
+
+        // --- 硬判决：选择最近星座点（向量化） ---
+        // dist(i,j) = |Mu_q(i) - sym(j)|  →  找每行最小
+        // 展开为  (Mu_q - sym')^2  的 argmin
+        MatrixNS dist2;
+        if constexpr (heapAlloc)
+            dist2.resize(N, slen);
+        dist2 = (Mu_q.replicate(1, slen) - sym.transpose().replicate(N, 1)).array().square();
+
+        Eigen::Vector<PrecType, 2 * TxAntNum> result;
+        for (Eigen::Index i = 0; i < static_cast<Eigen::Index>(N); ++i)
+        {
+            Eigen::Index minIdx;
+            dist2.row(i).minCoeff(&minIdx);
+            result(i) = QAM::symbolsRD[minIdx];
+        }
+
+        return result;
+    }
+};
+
 
 template <typename Detection>
 class SphereDecoder
