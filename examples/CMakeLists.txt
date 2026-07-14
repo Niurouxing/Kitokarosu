@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.25)
 project(KitokarosuExamples)
 
 # 自动查找所有.cpp源文件（排除CMake自动生成的文件）

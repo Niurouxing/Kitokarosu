@@ -1,119 +1,30 @@
 #pragma once
 #include <Eigen/Dense>
-#include <vector>
-#include <iostream>
-#include <random>
-#include <bitset>
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <bitset>
 #include <cassert>
+#include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <memory>
 #include <numeric>
+#include <optional>
+#include <random>
 #include <ranges>
 #include <span>
+#include <stdexcept>
+#include <string_view>
 #include <tuple>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 
-namespace Kito{
-
-// 初始化随机数生成器
-inline static thread_local std::mt19937 gen;
-
-
-inline void set_random_seed(unsigned int seed) {
-    gen.seed(seed);
-}
-
-
-// 均匀分布整数
-template <int min, int max>
-inline static int uniform_int_distribution()
-{
-    thread_local static std::uniform_int_distribution<int> dist(min, max);
-    return dist(gen);
-}
-
-// 正态分布
-template <auto mean, auto stddev>
-inline static double normal_distribution()
-{
-    thread_local static std::normal_distribution<double> dist(mean, stddev);
-    return dist(gen);
-}
-
-
-
-
-// ------------------- concept -------------------
-
-template<typename T>
-concept IntegralValue = std::integral<std::remove_reference_t<T>>;
-
-template<typename T>
-concept FirstElementIsIntegral = requires(T a) {
-    { a[0] } -> IntegralValue;
-};
-
-// ------------------- tagExtractor -------------------
-
-template <typename Tag, typename... Args>
-struct tagExtractor;
-
-// 值未能匹配，最终返回默认值
-template <typename T, template <T> class Tag, T Value>
-struct tagExtractor<Tag<Value>>
-{
-    static constexpr T value = Value;
-};
-
-// 值匹配成功
-template <typename T, template <T> class Tag, T Value, T Value2,
-          typename... Args>
-struct tagExtractor<Tag<Value>, Tag<Value2>, Args...>
-{
-    static constexpr T value = Value2;
-};
-
-// 类型未能匹配，最终返回默认值
-template <template <typename> class Tag, typename T>
-struct tagExtractor<Tag<T>>
-{
-    using type = T;
-};
-
-// 类型未能匹配，最终返回默认值，多个参数版本
-// 注意多个参数版本非常特殊地会将Tag<>保留
-template <template <typename...> class Tag, typename... Args>
-struct tagExtractor<Tag<Args...>>
-{
-    using type = Tag<Args...>;
-};
-
-// 类型匹配成功，单个参数版本
-template <template <typename> class Tag, typename T, typename T2,
-          typename... Args>
-struct tagExtractor<Tag<T>, Tag<T2>, Args...>
-{
-    using type = T2;
-};
-
-// 类型匹配成功，多个参数版本
-template <template <typename...> class Tag, typename... Args, typename... Args2,
-          typename... Args3>
-struct tagExtractor<Tag<Args...>, Tag<Args2...>, Args3...>
-{
-    using type = Tag<Args2...>;
-};
-
-// 匹配失败，类型不符，继续递归
-template <typename Tag, typename Tag2, typename... Args>
-struct tagExtractor<Tag, Tag2, Args...> : tagExtractor<Tag, Args...>
-{};
-
-
-
-
+namespace Kito::detail {
 
 // ------------------- LDPC -------------------
 
@@ -665,12 +576,6 @@ struct layer_t
 {
     size_t edgeStart;
     size_t edgeEnd;
-
-    void print()
-    {
-        std::cout << "edgeStart: " << edgeStart << " edgeEnd: " << edgeEnd
-                  << std::endl;
-    }
 };
 
 // 循环移位函数（左移 nShifts）
@@ -866,7 +771,7 @@ struct TannerGenerator<BG2>
 };
 
 template <size_t infoLen, double codeRate>
-class nrLDPC
+class nr_ldpc
 {
 public:
     inline static constexpr size_t mKBar = infoLen;
@@ -892,22 +797,6 @@ public:
     inline static constexpr auto mEdges = TannerGenerator<BG>::generateEdges(mZc, mShiftSet);
     inline static constexpr auto mLayers = TannerGenerator<BG>::generateLayers();
 
-    void debug()
-    {
-        std::cout << "mKBar: " << mKBar << std::endl;
-        std::cout << "mR: " << mR << std::endl;
-        std::cout << "mZc: " << mZc << std::endl;
-        std::cout << "mShiftSet: " << mShiftSet << std::endl;
-
-        std::cout << "mK: " << mK << std::endl;
-        std::cout << "mN: " << mN << std::endl;
-
-        std::cout << "Kb: " << Kb << std::endl;
-        std::cout << "Cb: " << Cb << std::endl;
-        std::cout << "totEdges: " << totEdges << std::endl;
-        std::cout << "totLayers: " << totLayers << std::endl;
-    }
-
     // encode
 
     // inside codeword storage
@@ -919,11 +808,14 @@ public:
     std::array<bool, mK> bitsOut;
 
     // 预计算环形缓冲区长度
-    inline static constexpr size_t txBufferRingSize = mN - 2 * mZc - mF;
+    inline static constexpr size_t systematicAfterPuncture =
+        mKBar > 2 * mZc ? mKBar - 2 * mZc : 0;
+    inline static constexpr size_t txBufferRingSize =
+        mN - mK + systematicAfterPuncture;
     std::array<bool, txBufferRingSize> txBufferRing;
 
     // 速率恢复环形缓冲区
-    inline static constexpr size_t rxRingLen = mN - 2 * mZc - mF;
+    inline static constexpr size_t rxRingLen = txBufferRingSize;
     std::array<double, rxRingLen> rxBufferRing;
 
     // 译码
@@ -934,74 +826,25 @@ public:
 
     // function
 
-    inline auto& encode()
-    {
-        constexpr size_t fullZcNum = mKBar / mZc;
-        constexpr size_t lastZcNum = mKBar % mZc;
-
-
-        // uint64_t随机数生成器
-        thread_local static std::uniform_int_distribution<uint64_t> uint64_dist;
-
-        // cWord 的前 fullZcNum 个元素随机
-        for (unsigned i = 0; i < fullZcNum; i++)
-        {
-            cWord[i].reset();
-            for (unsigned j = 0; j < mZc; j++)
-            {
-                cWord[i].set(mZc - 1 - j, rand() % 2);
-            }
-             
-        }
-        // 最后一个元素的前 lastZcNum 位随机
-        cWord[fullZcNum].reset();
-        for (unsigned j = 0; j < lastZcNum; j++)
-        {
-            cWord[fullZcNum].set(mZc - 1 - j, rand() % 2);
-        }
- 
-        // 其余元素清零
-        for (unsigned i = fullZcNum + 1; i < Cb; i++)
-        {
-            cWord[i].reset();
-        }
-
-        // save to msg
-        for (unsigned i = 0; i < Kb; i++)
-        {
-            for (unsigned j = 0; j < mZc; j++)
-            {
-                msg[i * mZc + j] = cWord[i].test(mZc - 1 - j);
-            }
-        }
-
-
-
-        return encodeImpl();
-
-    }
-
     inline auto& encode(const auto &msgInput)
     {
-        assert(Kb * mZc == msgInput.size());
+        assert(mKBar == msgInput.size());
 
         // copy to msg
         std::copy(msgInput.begin(), msgInput.end(), msg.begin());
 
-
-        // 初始化时逐位复制（假设 msg 是连续的 bool 数组）
-        for (unsigned i = 0; i < Kb; i++)
+        // 信息区、填充区和校验区全部归零，再仅写入 KBar 个消息比特。
+        // 旧实现按 Kb*Zc 读取 msgInput，在存在 filler 时会越界。
+        for (auto &word : cWord)
         {
-            for (unsigned j = 0; j < mZc; j++)
-            {
-                cWord[i].set(mZc - 1 - j, msgInput[i * mZc + j]);
-            }
+            word.reset();
         }
 
-        // 初始化填充节点
-        for (unsigned i = Kb; i < Cb; i++)
+        for (size_t bit = 0; bit < mKBar; ++bit)
         {
-            cWord[i].reset();
+            const auto word = bit / mZc;
+            const auto offset = bit % mZc;
+            cWord[word].set(mZc - 1 - offset, msgInput[bit]);
         }
 
         return encodeImpl();
@@ -1080,23 +923,6 @@ public:
         return codeword;
     }
 
-    inline bool checkSumCodeWord()
-    {
-        for (unsigned i = 0; i < totLayers; i++)
-        {
-            std::bitset<mZc> checkNode;
-            for (unsigned edgeIdx = mLayers[i].edgeStart; edgeIdx < mLayers[i].edgeEnd; edgeIdx++)
-            {
-                unsigned vNodeIdx = mEdges[edgeIdx].vNodeIdx;
-                unsigned nShifts = mEdges[edgeIdx].nShifts;
-                checkNode ^= circShiftBitSet(cWord[vNodeIdx], nShifts);
-            }
-            assert(checkNode.none());
-        }
-
-        return true;
-    }
-
     inline void rateMatch(auto &output)
     {
         for (size_t i = 0; i < output.size(); ++i)
@@ -1111,18 +937,27 @@ public:
         rxBufferRing.fill(0.0);
         for (unsigned i = 0; i < softBitsIn.size(); i++)
         {
-            rxBufferRing[i % rxRingLen] = softBitsIn[i];
+            rxBufferRing[i % rxRingLen] += softBitsIn[i];
         }
 
-        const auto LLRBegin = LLR[0].begin();
-        // first 2*Zc with all 0
-        std::fill(LLRBegin, LLRBegin + 2 * mZc, 0.0);
-        // add information soft bits
-        std::copy(rxBufferRing.begin(), rxBufferRing.begin() + mKBar - 2 * mZc, LLRBegin + 2 * mZc);
-        // fillers
-        std::fill(LLRBegin + mKBar, LLRBegin + mKBar + mF, std::numeric_limits<double>::infinity());
-        // add parity soft bits
-        std::copy(rxBufferRing.begin() + mKBar - 2 * mZc, rxBufferRing.end(), LLRBegin + mKBar + mF);
+        for (auto &word : LLR)
+            word.fill(0.0);
+
+        // Non-punctured systematic bits precede parity bits in the ring.
+        for (size_t i = 0; i < systematicAfterPuncture; ++i)
+            LLR[(2 * mZc + i) / mZc][(2 * mZc + i) % mZc] =
+                rxBufferRing[i];
+
+        // Fillers are known zero bits and therefore have +infinite LLR.
+        for (size_t i = mKBar; i < mK; ++i)
+            LLR[i / mZc][i % mZc] =
+                std::numeric_limits<double>::infinity();
+
+        for (size_t i = systematicAfterPuncture; i < rxRingLen; ++i)
+        {
+            const auto codewordIdx = mK + i - systematicAfterPuncture;
+            LLR[codewordIdx / mZc][codewordIdx % mZc] = rxBufferRing[i];
+        }
 
         return LLR;
 
@@ -1130,7 +965,22 @@ public:
 
     inline auto& decode(const unsigned nMaxIter)
     {
-        constexpr unsigned nMaxLayer = ((mKBar + mR - 1) / mR + mF + mZc - 1) / mZc - BG::nMaxLayerOffset;
+        constexpr double exactTransmittedBits =
+            static_cast<double>(mKBar) / mR;
+        constexpr size_t truncatedTransmittedBits =
+            static_cast<size_t>(exactTransmittedBits);
+        constexpr size_t transmittedBits =
+            truncatedTransmittedBits +
+            (static_cast<double>(truncatedTransmittedBits) <
+             exactTransmittedBits);
+        constexpr size_t estimatedLayers =
+            (transmittedBits + mF + mZc - 1) / mZc;
+        constexpr size_t requestedLayers =
+            estimatedLayers > BG::nMaxLayerOffset
+                ? estimatedLayers - BG::nMaxLayerOffset
+                : 0;
+        constexpr unsigned nMaxLayer = static_cast<unsigned>(
+            requestedLayers < totLayers ? requestedLayers : totLayers);
 
         // initialize msg from check nodes to vector nodes, each edge correspond a message
         thread_local static std::array<std::array<double, mZc>, totEdges> CtoVMsg{};
@@ -1164,14 +1014,6 @@ public:
                     }
                 }
 
-                // check node operation
-                std::vector<std::vector<double>> VtoCMsgVec(nLayerEdges);
-                for (unsigned i = 0; i < nLayerEdges; i++)
-                {
-                    VtoCMsgVec[i] = std::vector<double>(VtoCMsg[i].begin(), VtoCMsg[i].end());
-                }
-
-                // vector<vector<double>> minSumMsgs = checkNodeOperation<mZc>(VtoCMsgVec);
                 auto minSumMsgs = checkNodeOperation(VtoCMsg, nLayerEdges);
 
                 // message from check node to varible nodes
@@ -1196,1276 +1038,2287 @@ public:
         }
 
         // directly output to decBits
-        const auto LLRBegin = LLR[0].begin();
         for (unsigned i = 0; i < mKBar; i++)
         {
-            decBits[i] = LLRBegin[i] <= 0;
+            decBits[i] = LLR[i / mZc][i % mZc] <= 0;
         }
 
         return decBits;
     }
 };
-// ------------------- Detection -------------------
+} // namespace Kito::detail
 
-// specify using float or double
-template <typename PrecType>
-struct Prec;
+// C++26 laboratory API.
+// -----------------------------------------------------------------------------
+// Compile-time type graph
+// -----------------------------------------------------------------------------
 
-// specify using real domain or complex domain
-struct RD;
-struct CD;
+namespace Kito::meta {
 
-template <typename DomainType>
-struct Dom
-{
-    using type = DomainType;
+template <typename... Ts> struct type_list {
+  static constexpr std::size_t size = sizeof...(Ts);
 };
 
-template <size_t N>
-struct Rx
-{
-    static constexpr size_t value = N;
+template <typename T, typename List> struct contains;
+
+template <typename T, typename... Ts>
+struct contains<T, type_list<Ts...>>
+    : std::bool_constant<(std::is_same_v<T, Ts> || ...)> {};
+
+template <typename T, typename List>
+inline constexpr bool contains_v = contains<T, List>::value;
+
+template <typename... Lists> struct concat;
+
+template <> struct concat<> {
+  using type = type_list<>;
 };
 
-template <size_t N>
-struct Tx
-{
-    static constexpr size_t value = N;
+template <typename... Ts> struct concat<type_list<Ts...>> {
+  using type = type_list<Ts...>;
 };
 
+template <typename... Ts, typename... Us, typename... Rest>
+struct concat<type_list<Ts...>, type_list<Us...>, Rest...>
+    : concat<type_list<Ts..., Us...>, Rest...> {};
 
-struct BER {
-    template <size_t Bits>
-    static inline size_t per_symbol(size_t estimated_index, size_t true_index) {
-        return std::bitset<Bits>(estimated_index ^ true_index).count();
-    }
-    static inline size_t reduce(size_t sum) {
-        return sum;
-    }
+template <typename... Lists> using concat_t = typename concat<Lists...>::type;
+
+namespace detail {
+
+template <typename Remaining, typename Result> struct unique_impl;
+
+template <typename... Result>
+struct unique_impl<type_list<>, type_list<Result...>> {
+  using type = type_list<Result...>;
 };
 
-struct SER {
-    template <size_t Bits>
-    static inline size_t per_symbol(size_t estimated_index, size_t true_index) {
-        return (estimated_index != true_index) ? 1 : 0;
-    }
-    static inline size_t reduce(size_t sum) {
-        return sum;
-    }
+template <typename Head, typename... Tail, typename... Result>
+struct unique_impl<type_list<Head, Tail...>, type_list<Result...>>
+    : unique_impl<type_list<Tail...>,
+                  std::conditional_t<contains_v<Head, type_list<Result...>>,
+                                     type_list<Result...>,
+                                     type_list<Result..., Head>>> {};
+
+} // namespace detail
+
+template <typename List> struct unique;
+
+template <typename... Ts>
+struct unique<type_list<Ts...>>
+    : detail::unique_impl<type_list<Ts...>, type_list<>> {};
+
+template <typename List> using unique_t = typename unique<List>::type;
+
+template <template <typename> typename Predicate, typename List> struct filter;
+
+template <template <typename> typename Predicate>
+struct filter<Predicate, type_list<>> {
+  using type = type_list<>;
 };
 
-// 新增 FER 标签
-struct FER {
-    template <size_t Bits>
-    static inline size_t per_symbol(size_t estimated_index, size_t true_index) {
-        // 与 SER 相同，先逐符号计 0/1
-        return (estimated_index != true_index) ? 1 : 0;
-    }
-    static inline size_t reduce(size_t sum) {
-        // 帧级：该帧内任意符号出错则记为 1，否则 0
-        return (sum > 0) ? 1 : 0;
-    }
-};
-
-template< typename Prec>
-struct QAM16
-{
-    inline static constexpr size_t bitLength = 4;
-    inline static constexpr std::array<Prec, 4> symbolsRD = {
-        -0.31622776601683794, -0.9486832980505138, 0.31622776601683794,
-        0.9486832980505138};
-    inline static constexpr double Delta = 0.63245553;
-};
-
-template< typename Prec>
-struct QAM64
-{
-    inline static constexpr size_t bitLength = 6;
-    inline static constexpr std::array<Prec, 8> symbolsRD = {
-        -0.4629100498862757, -0.1543033499620919, -0.7715167498104595,
-        -1.0801234497346432, 0.1543033499620919, 0.4629100498862757,
-        0.7715167498104595, 1.0801234497346432};
-        inline static constexpr double Delta = 0.3086067;
-};
-
-template< typename Prec>
-struct QAM256
-{
-    inline static constexpr size_t bitLength = 8;
-    inline static constexpr std::array<Prec, 16> symbolsRD = {
-        -0.3834824944236852, -0.5368754921931592, -0.2300894966542111,
-        -0.07669649888473704, -0.8436614877321074, -0.6902684899626333,
-        -0.9970544855015815, -1.1504474832710556, 0.3834824944236852,
-        0.5368754921931592, 0.2300894966542111, 0.07669649888473704,
-        0.8436614877321074, 0.6902684899626333, 0.9970544855015815,
-        1.1504474832710556};
-
-        inline static constexpr double Delta = 0.153393;
-};
-
-template <typename ModType>
-struct Mod
-{
-    using type = ModType;
-};
-
-template <typename... Args>
-class Detection_s;
-
-template <typename PrecInput, size_t RxAntNumInput, size_t TxAntNumInput,
-          typename ModTypeInput>
-class Detection_s<Prec<PrecInput>, Dom<RD>, Rx<RxAntNumInput>,
-                  Tx<TxAntNumInput>, Mod<ModTypeInput>>
-{
-public:
-    inline static constexpr size_t RxAntNum = RxAntNumInput;
-    inline static constexpr size_t TxAntNum = TxAntNumInput;
-    using ModType = ModTypeInput;
-    using PrecType = PrecInput;
-
-    inline static constexpr auto symbolsRD = ModType::symbolsRD;
-
-    Eigen::Vector<size_t, 2 * TxAntNum> TxIndices;
-    Eigen::Vector<PrecType, 2 * TxAntNum> TxSymbols;
-    Eigen::Vector<PrecType, 2 * RxAntNum> RxSymbols;
-    // Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum> H;
-
-    static constexpr bool heapAlloc = TxAntNum * RxAntNum >= 64 * 64;
-
-    // if TxAntNum * RxAntNum >= 128 * 128, use dynamic allocation
-    using H_type = std::conditional_t<heapAlloc,
-                                      Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>,
-                                      Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>>;
-
-    H_type H;
-
-    double SNRdB = 0;
-    double Nv = 1;
-    double sqrtNvDiv2 = std::sqrt(Nv / 2);
-
-    Detection_s()
-    {
-        if constexpr (heapAlloc)
-        {
-            H.resize(2 * RxAntNum, 2 * TxAntNum);
-        }
-    }
-
-    void setSNR(const double SNRdB)
-    {
-        this->SNRdB = SNRdB;
-        Nv = TxAntNum * RxAntNum /
-             (std::pow(10, SNRdB / 10) * ModType::bitLength * TxAntNum);
-        sqrtNvDiv2 = std::sqrt(Nv / 2);
-    }
-
-    inline void generateTx()
-    {
-        std::generate(TxIndices.begin(), TxIndices.end(), []() {
-            return uniform_int_distribution<0, ModType::symbolsRD.size() - 1>();
-        });
-        std::transform(TxIndices.begin(), TxIndices.end(), TxSymbols.begin(),
-                       [](size_t index) { return symbolsRD[index]; });
-    }
-
-    template <typename It>
-    requires std::contiguous_iterator<It> && std::same_as<std::iter_value_t<It>, bool>
-    inline void generateTx(const It bitsInput)
-    {
-        constexpr size_t chunk_size = ModType::bitLength / 2;
-        constexpr size_t num_chunks = 2 * TxAntNum;
-        constexpr size_t total_bits = ModType::bitLength * TxAntNum;
-    
-        std::span<const bool> input_span{bitsInput, total_bits};
-    
-        constexpr auto indices = std::views::iota(0u, num_chunks);
-    
-        constexpr auto to_int = [](std::span<const bool> chunk) {
-            int result = 0;
-            for (bool b : chunk) {
-                result = (result << 1) | (b ? 1 : 0);
-            }
-            return result;
-        };
-    
-        std::ranges::transform(indices, TxIndices.begin(),
-            [&](auto index) {
-                auto chunk = input_span.subspan(index * chunk_size, chunk_size);
-                return to_int(chunk);
-            });
-    
-        std::ranges::transform(TxIndices.begin(), TxIndices.end(), TxSymbols.begin(),
-            [](size_t index) { return symbolsRD[index]; });
-    }
-
-    inline void generateH()
-    {
-
-        for (size_t j = 0; j < TxAntNum; j++)
-        {
-            for (size_t i = 0; i < RxAntNum; i++)
-            {
-                auto temp = normal_distribution<0, 0.7071067811865475>();
-
-                H(i, j) = temp;
-                H(i + RxAntNum, j + TxAntNum) = temp;
-
-                temp = normal_distribution<0, 0.7071067811865475>();
-                H(i, j + TxAntNum) = temp;
-                H(i + RxAntNum, j) = -temp;
-            }
-        }
-    }
-
-    inline void generateRx()
-    {
-        RxSymbols = H * TxSymbols;
-        RxSymbols += Eigen::Vector<PrecType, 2 * RxAntNum>::NullaryExpr([&](size_t i) { return normal_distribution<0, 1>() * sqrtNvDiv2; });
-    }
-
-    inline void generate(const auto&&... input)
-    {
-        generateTx(input...);
-        generateH();
-        generateRx();
-    }
-
+template <template <typename> typename Predicate, typename Head,
+          typename... Tail>
+struct filter<Predicate, type_list<Head, Tail...>> {
 private:
-    template <typename... Metrics, typename T>
-    auto _judge_impl(const T& indicesEst)
-    {
-        static_assert(sizeof...(Metrics) > 0, "At least one metric must be specified");
+  using filtered_tail = typename filter<Predicate, type_list<Tail...>>::type;
 
-        constexpr size_t Bits = ModType::bitLength / 2;
-        constexpr auto N = sizeof...(Metrics);
-        using index_seq = std::make_index_sequence<N>;
-
-        using sums_tuple_t = std::tuple<decltype(Metrics::template per_symbol<Bits>(0, 0))...>;
-        sums_tuple_t sums{}; // 按度量逐项累加（逐符号）
-
-        for (size_t i = 0; i < indicesEst.size(); ++i) {
-            const size_t estimated_index = static_cast<size_t>(indicesEst[i]);
-            const size_t true_index      = static_cast<size_t>(TxIndices[i]);
-
-            [&]<std::size_t... I>(std::index_sequence<I...>) {
-                ((std::get<I>(sums) +=
-                    std::tuple_element_t<I, std::tuple<Metrics...>>::template per_symbol<Bits>(
-                        estimated_index, true_index)), ...);
-            }(index_seq{});
-        }
-
-        if constexpr (N == 1) {
-            using M0 = std::tuple_element_t<0, std::tuple<Metrics...>>;
-            return M0::reduce(std::get<0>(sums));
-        } else {
-            return [&]<std::size_t... I>(std::index_sequence<I...>) {
-                return std::make_tuple(
-                    std::tuple_element_t<I, std::tuple<Metrics...>>::reduce(std::get<I>(sums))...
-                );
-            }(index_seq{});
-        }
-    }
- 
 public:
-    // 默认：浮点符号输入，返回 BER（保持向后兼容）
-    template <typename T>
-        requires  (!FirstElementIsIntegral<T>)
-    inline size_t judge(T &symbolsEst)
-    {
-        return this->template judge<BER>(symbolsEst);
-    }
-
-    // 可变参数模板：浮点符号输入
-    template <typename... Metrics, typename T>
-        requires  (!FirstElementIsIntegral<T>) && (sizeof...(Metrics) > 0)
-    inline auto judge(T &symbolsEst)
-    {
-        thread_local std::array<size_t, 2 * TxAntNum> estimated_indices;
-
-        std::transform(symbolsEst.begin(), symbolsEst.end(), estimated_indices.begin(),
-            [this](auto symbol) {
-                auto closest_it = std::min_element(symbolsRD.begin(), symbolsRD.end(),
-                                                [symbol](auto x, auto y) {
-                                                    return std::abs(x - symbol) < std::abs(y - symbol);
-                                                });
-                return static_cast<size_t>(std::distance(symbolsRD.begin(), closest_it));
-            });
-
-        return _judge_impl<Metrics...>(estimated_indices);
-    }
-
-    // 默认：整数索引输入，返回 BER（保持向后兼容）
-    template <typename T>
-        requires  (FirstElementIsIntegral<T>)
-    inline size_t judge(T &indicesEst)
-    {
-        return this->template judge<BER>(indicesEst);
-    }
-
-    // 可变参数模板：整数索引输入
-    template <typename... Metrics, typename T>
-        requires  (FirstElementIsIntegral<T>) && (sizeof...(Metrics) > 0)
-    inline auto judge(T &indicesEst)
-    {
-        return _judge_impl<Metrics...>(indicesEst);
-    }
+  using type = std::conditional_t<static_cast<bool>(Predicate<Head>::value),
+                                  concat_t<type_list<Head>, filtered_tail>,
+                                  filtered_tail>;
 };
 
-template <typename... Args>
-struct DetectionInputHelper
-{
-    inline static constexpr auto RxAntNum = tagExtractor<Rx<4>, Args...>::value;
-    inline static constexpr auto TxAntNum = tagExtractor<Tx<4>, Args...>::value;
+template <template <typename> typename Predicate, typename List>
+using filter_t = typename filter<Predicate, List>::type;
 
-    using DomainType = tagExtractor<Dom<RD>, Args...>::type;
-    using PrecType = tagExtractor<Prec<float>, Args...>::type;
-    using ModType = tagExtractor<Mod<QAM16<PrecType>>, Args...>::type;
-    static_assert(RxAntNum > 0, "RxAntNum must be greater than 0");
-    static_assert(TxAntNum > 0, "TxAntNum must be greater than 0");
-    static_assert(RxAntNum >= TxAntNum,
-                  "RxAntNum must be greater than or equal to TxAntNum");
+template <template <typename> typename Function, typename List>
+struct transform;
 
-    // static_assert(std::is_same<ModType, QAM16<PrecType>>::value ||
-    //                   std::is_same<ModType, QAM64<PrecType>>::value ||
-    //                   std::is_same<ModType, QAM256<PrecType>>::value,
-    //               "ModType must be QAM16, QAM64 or QAM256");
-    static_assert(std::is_same<DomainType, RD>::value ||
-                      std::is_same<DomainType, CD>::value,
-                  "DomainType must be RD or CD");
-    static_assert(std::is_same<PrecType, float>::value ||
-                      std::is_same<PrecType, double>::value,
-                  "PrecType must be float or double");
-
-    using type = Detection_s<Prec<PrecType>, Dom<DomainType>, Rx<RxAntNum>,
-                             Tx<TxAntNum>, Mod<ModType>>;
+template <template <typename> typename Function, typename... Ts>
+struct transform<Function, type_list<Ts...>> {
+  using type = type_list<typename Function<Ts>::type...>;
 };
 
-template <typename... Args>
-using Detection = typename DetectionInputHelper<Args...>::type;
+template <template <typename> typename Function, typename List>
+using transform_t = typename transform<Function, List>::type;
 
+namespace detail {
 
-template <typename ModType, typename PrecType, size_t TxAntNum, size_t RxAntNum>
-class MMSE {
-public:
-    // Eigen 类型定义保持不变
-    using MatrixH = Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>;
-    using VectorY = Eigen::Matrix<PrecType, 2 * RxAntNum, 1>;
-    using MatrixW = Eigen::Matrix<PrecType, 2 * TxAntNum, 2 * RxAntNum>;
-    using VectorX = Eigen::Matrix<PrecType, 2 * TxAntNum, 1>;
-    using VectorMu = Eigen::Matrix<PrecType, 2 * TxAntNum, 1>;
-    using VectorSigma = Eigen::Matrix<PrecType, 2 * TxAntNum, 1>;
+template <typename> inline constexpr bool dependent_false_v = false;
 
-    // 中间结果存储
-    MatrixW W;
-    VectorMu mu;
-    VectorSigma sigma_eff_sq;
-    VectorX x_est;
-    VectorX s_norm;
-    Eigen::Matrix<PrecType, Eigen::Dynamic, 1> llr;
+template <typename T> struct is_type_list : std::false_type {};
 
-    // 星座图相关参数
-    static constexpr size_t bits_per_symbol = ModType::bitLength;
-    static constexpr size_t bits_per_dim = bits_per_symbol / 2;
-    static constexpr auto& symbols = ModType::symbolsRD;
+template <typename... Ts>
+struct is_type_list<type_list<Ts...>> : std::true_type {};
 
-    MMSE(const MatrixH& H, const VectorY& y, PrecType Nv) 
-        : H_(H), y_(y), Nv_(Nv) {
-        // 调用重写的计算函数
-        calculate_mmse_matrix_manual();
-        estimate_symbols_manual();
-        normalize_symbols_manual();
-    }
+template <typename T>
+inline constexpr bool is_type_list_v = is_type_list<T>::value;
 
-    // LLR 计算部分保持不变，因为它已经是手动计算
-    void compute_llr() {
-        const size_t total_bits = 2 * TxAntNum * bits_per_dim;
-        llr.resize(total_bits);
-        
-        for(int i = 0; i < 2 * TxAntNum; ++i) {
-            const PrecType s = s_norm[i];
-            const PrecType inv_sigma_sq = 1.0 / sigma_eff_sq[i];
-            
-            for(int b = 0; b < bits_per_dim; ++b) {
-                PrecType min_dist_0 = std::numeric_limits<PrecType>::max();
-                PrecType min_dist_1 = min_dist_0;
-                
-                for(size_t k = 0; k < symbols.size(); ++k) {
-                    // 假设的比特映射逻辑
-                    const bool bit = (k >> (bits_per_dim - 1 - b)) & 1;
-                    const PrecType dist = std::pow(s - symbols[k], 2);
-                    
-                    if(bit) {
-                        min_dist_1 = std::min(min_dist_1, dist);
-                    } else {
-                        min_dist_0 = std::min(min_dist_0, dist);
-                    }
-                }
-                
-                llr[i * bits_per_dim + b] = (min_dist_1 - min_dist_0) * inv_sigma_sq;
-            }
-        }
-    }
+template <typename Node, typename = void> struct node_dependencies {
+  static_assert(dependent_false_v<Node>,
+                "Kito::meta::dependency_closure_t: every node must declare "
+                "`using dependencies = Kito::meta::type_list<...>`");
+  using type = type_list<>;
+};
 
-    // 获取中间结果的接口保持不变
-    const VectorX& estimated_symbols() const { return x_est; }
-    const VectorX& normalized_symbols() const { return s_norm; }
-    const Eigen::Matrix<PrecType, Eigen::Dynamic, 1>& get_llr() const { return llr; }
-
+template <typename Node>
+struct node_dependencies<Node, std::void_t<typename Node::dependencies>> {
 private:
-    MatrixH H_;
-    VectorY y_;
-    PrecType Nv_;
+  using declared_type = typename Node::dependencies;
 
-    // 定义矩阵维度常量以便复用
-    static constexpr size_t M = 2 * TxAntNum; // H 的列数，W 的行数
-    static constexpr size_t K = 2 * RxAntNum; // H 的行数，W 的列数
-
-    // =========================================================================
-    // == 手动实现的计算函数
-    // =========================================================================
-
-    // 辅助函数：优化的Cholesky分解 A = L*L^T (L的对角线为 1/sqrt(...) )
-    // A 是一个 M x M 的对称正定矩阵
-    void cholesky_decomposition(const Eigen::Matrix<PrecType, M, M>& A, Eigen::Matrix<PrecType, M, M>& L) {
-        L.setZero();
-        for (size_t i = 0; i < M; ++i) {
-            for (size_t j = 0; j <= i; ++j) {
-                PrecType sum = 0;
-                for (size_t k = 0; k < j; ++k) {
-                    sum += L(i, k) * L(j, k);
-                }
-
-                if (i == j) {
-                    PrecType diagonal_val = A(i, i) - sum;
-                    if (diagonal_val <= 1e-9) { // 增加数值稳定性检查
-                        // 错误处理或设置为一个很小的值
-                        // std::cerr << "Error: Matrix is not positive definite!" << std::endl;
-                        // exit(1);
-                        diagonal_val = 1e-9;
-                    }
-                    L(i, j) = 1.0 / std::sqrt(diagonal_val);
-                } else {
-                    L(i, j) = (A(i, j) - sum) * L(j, j);
-                }
-            }
-        }
-
-        // print L for debugging
-        // std::cout << "Cholesky factor L:\n" << L << std::endl;
-    }
-
-    // 辅助函数：计算下三角矩阵 L 的逆
-    // L 的对角线元素是已经求过倒数的
-    void invert_lower_triangular(const Eigen::Matrix<PrecType, M, M>& L, Eigen::Matrix<PrecType, M, M>& Linv) {
-        Linv.setZero();
-        for (size_t j = 0; j < M; ++j) {
-            Linv(j, j) = L(j, j); // 对角元素直接复制 (已经是倒数形式)
-            
-            for (size_t i = j + 1; i < M; ++i) {
-                PrecType sum = 0;
-                for (size_t k = j; k < i; ++k) {
-                    sum += L(i, k) * Linv(k, j);
-                }
-                Linv(i, j) = -sum * L(i, i);
-            }
-        }
-    }
-
-    // 辅助函数：从Cholesky因子计算矩阵的逆 A_inv = (L_inv)^T * L_inv
-    void invert_from_cholesky(const Eigen::Matrix<PrecType, M, M>& L, Eigen::Matrix<PrecType, M, M>& A_inv) {
-        Eigen::Matrix<PrecType, M, M> Linv;
-        invert_lower_triangular(L, Linv);
-
-        // A_inv = Linv^T * Linv (高效计算)
-        // Linv 是下三角矩阵
-        for (size_t i = 0; i < M; ++i) {
-            for (size_t j = i; j < M; ++j) { // 只计算上三角部分，然后利用对称性
-                PrecType sum = 0;
-                // Linv^T的第i行是Linv的第i列
-                // Linv的第j列
-                for (size_t k = j; k < M; ++k) { // 优化：k从j开始，因为Linv(k,i)和Linv(k,j)在k<i或k<j时为0
-                    sum += Linv(k, i) * Linv(k, j);
-                }
-                A_inv(i, j) = sum;
-                if (i != j) {
-                    A_inv(j, i) = sum; // 利用对称性
-                }
-            }
-        }
-
-        // print A_inv for debugging
-        // std::cout << "Inverse matrix A_inv:\n" << A_inv << std::endl;
-
-    }
-
-
-    // 重写 calculate_mmse_matrix，使用手动计算
-    void calculate_mmse_matrix_manual() {
-        // 1. 计算 A = H^T * H + Nv * I
-        Eigen::Matrix<PrecType, M, M> A;
-        // 计算 H^T * H
-        for (size_t i = 0; i < M; ++i) {
-            for (size_t j = i; j < M; ++j) { // 利用对称性，只计算上三角和对角线
-                PrecType sum = 0;
-                for (size_t k = 0; k < K; ++k) {
-                    sum += H_(k, i) * H_(k, j); // H_T(i, k) * H_(k, j)
-                }
-                A(i, j) = sum;
-                if (i != j) A(j, i) = sum; // 填充下三角
-            }
-        }
-        // 加上 Nv * I
-        for (size_t i = 0; i < M; ++i) {
-            A(i, i) += Nv_;
-        }
-
-        // print A for debugging
-        // std::cout << "Matrix A (H^T * H + Nv * I):\n" << A << std::endl;
-
-        // 2. 计算 A 的逆: A_inv = (H^T * H + Nv * I)^-1
-        Eigen::Matrix<PrecType, M, M> L;
-        Eigen::Matrix<PrecType, M, M> A_inv;
-        cholesky_decomposition(A, L);
-        invert_from_cholesky(L, A_inv);
-        
-        // 3. 计算 W = A_inv * H^T
-        for (size_t i = 0; i < M; ++i) {
-            for (size_t j = 0; j < K; ++j) {
-                PrecType sum = 0;
-                for (size_t k = 0; k < M; ++k) {
-                    sum += A_inv(i, k) * H_(j, k); // H_T 的 (k, j) 元素是 H 的 (j, k) 元素
-                }
-                W(i, j) = sum;
-            }
-        }
-
-        // print W for debugging
-        // std::cout << "Matrix W (MMSE matrix):\n" << W << std::endl;
-
-        // 4. 计算 mu = diag(W * H)
-        for (size_t i = 0; i < M; ++i) {
-            PrecType sum = 0;
-            // 计算 W*H 矩阵的第(i, i)个元素
-            for (size_t k = 0; k < K; ++k) {
-                sum += W(i, k) * H_(k, i);
-            }
-            mu(i) = sum;
-        }
-
-        // print mu for debugging
-        // std::cout << "Vector mu (diagonal of W * H):\n" << mu.transpose() << std::endl;
-    }
-
-    // 重写 estimate_symbols，使用手动计算
-    void estimate_symbols_manual() {
-        // 1. 计算 x_est = W * y
-        for (size_t i = 0; i < M; ++i) {
-            PrecType sum = 0;
-            for (size_t k = 0; k < K; ++k) {
-                sum += W(i, k) * y_(k);
-            }
-            x_est(i) = sum;
-        }
-
-        // print x_est for debugging
-        // std::cout << "Estimated symbols x_est:\n" << x_est.transpose() << std::endl;
-        
-        // 2. 计算有效噪声方差 sigma_eff_sq
-        Eigen::Matrix<PrecType, 1, M> WH_row_i; // 存储 W*H 的某一行
-        for (int i = 0; i < M; ++i) {
-            // 计算 W*H 的第 i 行
-            for (int j = 0; j < M; ++j) {
-                PrecType sum = 0;
-                for (int k = 0; k < K; ++k) {
-                    sum += W(i, k) * H_(k, j);
-                }
-                WH_row_i(j) = sum;
-            }
-
-            // 计算干扰项：|| W_i * H ||^2 - mu_i^2
-            PrecType wh_row_norm_sq = 0;
-            for (int j = 0; j < M; ++j) {
-                wh_row_norm_sq += WH_row_i(j) * WH_row_i(j);
-            }
-            PrecType interference = wh_row_norm_sq - mu[i] * mu[i];
-
-            // 计算噪声放大项：|| W_i ||^2
-            PrecType noise_amp = 0;
-            for (int k = 0; k < K; ++k) {
-                noise_amp += W(i, k) * W(i, k);
-            }
-            
-            // 计算有效噪声方差
-            // 原论文公式为: (E[|x_i - mu_i*s_i|^2]) / mu_i^2 = (0.5 * interference + (Nv/2) * noise_amp) / mu_i^2
-            // 这里假设Es=1，实数域处理，所以去掉0.5
-            sigma_eff_sq[i] = (interference + Nv_ * noise_amp) / (mu[i] * mu[i]);
-        }
-
-        // print sigma_eff_sq for debugging
-        // std::cout << "Effective noise variance sigma_eff_sq:\n" << sigma_eff_sq.transpose() << std::endl;
-    }
-
-    // 重写 normalize_symbols，使用手动计算
-    void normalize_symbols_manual() {
-        for (size_t i = 0; i < M; ++i) {
-            s_norm(i) = x_est(i) / mu(i);
-        }
-        // print normalized symbols for debugging
-        // std::cout << "Normalized symbols s_norm:\n" << s_norm.transpose() << std::endl;
-    }
+public:
+  static_assert(
+      is_type_list_v<declared_type>,
+      "Kito::meta::dependency_closure_t: Node::dependencies must be a "
+      "Kito::meta::type_list<...>");
+  using type = std::conditional_t<is_type_list_v<declared_type>, declared_type,
+                                  type_list<>>;
 };
 
+template <typename Order, typename ActivePath> struct traversal_state {
+  using order = Order;
+  using active_path = ActivePath;
+};
 
-template <size_t K>
-std::vector<size_t> findSmallestKIndices(const auto &arr, size_t N)
-{
-    const size_t valid_N = std::min(N, arr.size());
-    const size_t k = std::min(K, valid_N);
-    if (k == 0)
-    {
-        return {};
-    }
+template <typename Nodes, typename State> struct visit_nodes;
 
-    using value_type = typename std::remove_cvref_t<decltype(arr)>::value_type;
-    std::vector<std::pair<value_type, size_t>> elements_with_index;
-    elements_with_index.reserve(valid_N);
-    for (size_t i = 0; i < valid_N; ++i)
-    {
-        elements_with_index.emplace_back(arr[i], i);
-    }
+template <typename Node, typename State, bool AlreadyVisited, bool OnActivePath>
+struct visit_node_impl;
 
-    auto compare = [](const auto &a, const auto &b) {
-        if (a.first != b.first)
-        {
-            return a.first < b.first;
-        }
-        else
-        {
-            return a.second < b.second;
-        }
-    };
+template <typename Node, typename Order, typename ActivePath, bool OnActivePath>
+struct visit_node_impl<Node, traversal_state<Order, ActivePath>, true,
+                       OnActivePath> {
+  using type = traversal_state<Order, ActivePath>;
+};
 
-    if (k < valid_N)
-    {
-        std::partial_sort(
-            elements_with_index.begin(),
-            elements_with_index.begin() + k,
-            elements_with_index.end(),
-            compare);
-    }
-    else
-    {
-        std::sort(elements_with_index.begin(), elements_with_index.end(), compare);
-    }
+template <typename Node, typename Order, typename ActivePath>
+struct visit_node_impl<Node, traversal_state<Order, ActivePath>, false, true> {
+private:
+  using cycle_path = concat_t<ActivePath, type_list<Node>>;
 
-    std::vector<size_t> result;
-    result.reserve(k);
-    for (size_t i = 0; i < k; ++i)
-    {
-        result.push_back(elements_with_index[i].second);
-    }
+public:
+  static_assert(dependent_false_v<cycle_path>,
+                "Kito::meta::dependency_closure_t: cyclic dependency detected; "
+                "the instantiated type_list is the active cycle path");
+  using type = traversal_state<Order, ActivePath>;
+};
 
-    return result;
+template <typename Node, typename Order, typename ActivePath>
+struct visit_node_impl<Node, traversal_state<Order, ActivePath>, false, false> {
+private:
+  using dependencies = typename node_dependencies<Node>::type;
+  using child_state =
+      traversal_state<Order, concat_t<ActivePath, type_list<Node>>>;
+  using after_dependencies =
+      typename visit_nodes<dependencies, child_state>::type;
+
+public:
+  using type = traversal_state<
+      concat_t<typename after_dependencies::order, type_list<Node>>,
+      ActivePath>;
+};
+
+template <typename Node, typename State> struct visit_node;
+
+template <typename Node, typename Order, typename ActivePath>
+struct visit_node<Node, traversal_state<Order, ActivePath>>
+    : visit_node_impl<Node, traversal_state<Order, ActivePath>,
+                      contains_v<Node, Order>, contains_v<Node, ActivePath>> {};
+
+template <typename State> struct visit_nodes<type_list<>, State> {
+  using type = State;
+};
+
+template <typename Head, typename... Tail, typename State>
+struct visit_nodes<type_list<Head, Tail...>, State> {
+private:
+  using after_head = typename visit_node<Head, State>::type;
+
+public:
+  using type = typename visit_nodes<type_list<Tail...>, after_head>::type;
+};
+
+template <typename Roots> struct dependency_closure;
+
+template <typename... Roots> struct dependency_closure<type_list<Roots...>> {
+private:
+  using final_state =
+      typename visit_nodes<type_list<Roots...>,
+                           traversal_state<type_list<>, type_list<>>>::type;
+
+public:
+  using type = typename final_state::order;
+};
+
+} // namespace detail
+
+// Stable, dependency-first topological traversal. Direct dependencies and roots
+// retain their left-to-right declaration order; a node shared by multiple paths
+// appears only at its first completed visit.
+template <typename Roots>
+using dependency_closure_t = typename detail::dependency_closure<Roots>::type;
+
+} // namespace Kito::meta
+
+// -----------------------------------------------------------------------------
+// Random source
+// -----------------------------------------------------------------------------
+
+namespace Kito {
+
+using random_engine_type = std::mt19937_64;
+
+[[nodiscard]] inline auto &random_engine() noexcept {
+  static thread_local random_engine_type engine;
+  return engine;
 }
 
-template <typename Detection, size_t K>
-class KBest
-{
-public:
-    // 类型别名
-    using QAM = typename Detection::ModType;
-    using PrecType = typename Detection::PrecType;
+inline void seed_random(std::uint64_t seed) noexcept {
+  random_engine().seed(seed);
+}
 
-    inline static constexpr auto TxAntNum = Detection::TxAntNum;
-    inline static constexpr auto RxAntNum = Detection::RxAntNum;
+inline void seed_random() {
+  std::random_device source;
+  std::seed_seq seed{source(), source(), source(), source()};
+  random_engine().seed(seed);
+}
 
-    // 矩阵存储
-    inline static constexpr bool heapAlloc = TxAntNum * RxAntNum >= 64 * 64;
-    using R_type = std::conditional_t<heapAlloc,
-                                      Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>,
-                                      Eigen::Matrix<PrecType, 2 * TxAntNum, 2 * TxAntNum>>;
+template <std::integral Integer>
+  requires(!std::same_as<std::remove_cv_t<Integer>, bool>)
+[[nodiscard]] inline auto random_integer(Integer lower, Integer upper)
+    -> Integer {
+  if (upper < lower) {
+    throw std::invalid_argument{
+        "random_integer: upper bound is below lower bound"};
+  }
+  return std::uniform_int_distribution<Integer>{lower, upper}(random_engine());
+}
 
-    R_type R;
+template <std::floating_point Real>
+[[nodiscard]] inline auto random_real(Real lower = Real{0},
+                                      Real upper = Real{1}) -> Real {
+  if (!(lower < upper)) {
+    throw std::invalid_argument{"random_real: expected lower < upper"};
+  }
+  return std::uniform_real_distribution<Real>{lower, upper}(random_engine());
+}
 
-    Eigen::Matrix<PrecType, 2 * Detection::TxAntNum, 1> z;
+template <std::floating_point Real>
+[[nodiscard]] inline auto random_normal(Real mean = Real{0},
+                                        Real standard_deviation = Real{1})
+    -> Real {
+  if (!(standard_deviation >= Real{0})) {
+    throw std::invalid_argument{
+        "random_normal: standard deviation must be non-negative"};
+  }
+  if (standard_deviation == Real{0}) {
+    return mean;
+  }
+  return std::normal_distribution<Real>{mean,
+                                        standard_deviation}(random_engine());
+}
 
-    using candidates_type = std::conditional_t<heapAlloc,
-    std::vector<PrecType>,
-    std::array<PrecType, K * QAM::symbolsRD.size()>>;
-    candidates_type candidates;
+[[nodiscard]] inline auto random_bit() -> bool {
+  return random_integer<unsigned>(0, 1) != 0;
+}
 
-    using survivor_inner_type = std::array<PrecType, 2 * Detection::TxAntNum>;
-    using survivors_type = std::conditional_t<heapAlloc,
-    std::vector<survivor_inner_type>,
-    std::array<survivor_inner_type, K>>;
-    survivors_type survivors;
-    survivors_type survivorsCopy;
+} // namespace Kito
 
+// -----------------------------------------------------------------------------
+// Immutable MIMO model
+// -----------------------------------------------------------------------------
 
+namespace Kito::literals {
 
+struct tx_count {
+  std::size_t value;
 
-    std::array<PrecType, K> currentSurvivePathPED;
+  [[nodiscard]] constexpr explicit operator std::size_t() const noexcept {
+    return value;
+  }
 
-    void initializeQR(const Detection &det)
-    {
-        auto &H = det.H;
-        // QR分解
-        if constexpr (TxAntNum == RxAntNum)
-        {
-            // no need to slice Q and R in such scenario
-            if constexpr  (heapAlloc)
-            {
-                Eigen::HouseholderQR<Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>> qr(H);
-
-                R = qr.matrixQR().template triangularView<Eigen::Upper>();
-                z = qr.householderQ().transpose() * det.RxSymbols;
-            }
-            else
-            {
-                Eigen::HouseholderQR<Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>> qr(H);
-
-                R = qr.matrixQR().template triangularView<Eigen::Upper>();
-                z = qr.householderQ().transpose() * det.RxSymbols;
-            }
-        }
-        else
-        {
-            if constexpr (heapAlloc)
-            {
-                Eigen::HouseholderQR<Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>> qr(H);
-                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> bQ = qr.householderQ();
-                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> bR = qr.matrixQR().template triangularView<Eigen::Upper>();
-
-                Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic> Q = bQ.leftCols(2 * TxAntNum);
-                R = bR.topRows(2 * TxAntNum);
-
-                z = (Q.transpose() * det.RxSymbols);
-            }
-            else
-            {
-                Eigen::HouseholderQR<Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum>> qr(H);
-                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * RxAntNum> bQ = qr.householderQ();
-                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum> bR = qr.matrixQR().template triangularView<Eigen::Upper>();
-
-                Eigen::Matrix<PrecType, 2 * RxAntNum, 2 * TxAntNum> Q = bQ.leftCols(2 * TxAntNum);
-                R = bR.topRows(2 * TxAntNum);
-
-                z = (Q.transpose() * det.RxSymbols);
-            }
-        }
-    }
-
-    auto run(const Detection &det)
-    {
-        if constexpr (heapAlloc)
-        {
-            R.resize(2 * TxAntNum, 2 * TxAntNum);
-            survivors.resize(K);
-            survivorsCopy.resize(K);
-            candidates.resize(K * QAM::symbolsRD.size());
-        }
-
-
-        initializeQR(det);
-
-        auto& symbols = QAM::symbolsRD;
-
-
-        currentSurvivePathPED.fill(0);
-
-        int currntSurvivePathNum = 1;
-        int currentLayer = 0;
-
-        for (int layer = 0; layer < 2 * Detection::TxAntNum; ++layer)
-        {
-            // 计算当前存活路径的PED
-            for (int i = 0; i < currntSurvivePathNum; ++i)
-            {
-                PrecType sharedPathDotProduct = 0;
-                for (int j = 0; j < layer; ++j)
-                {
-                    sharedPathDotProduct += survivors[i][j] * R(2 * Detection::TxAntNum - 1 - layer, 2 * Detection::TxAntNum - 1 - j);
-                }
-
-                PrecType zMinusSharedPathDotProduct = z(2 * Detection::TxAntNum - 1 - layer) - sharedPathDotProduct;
-                for (int j = 0; j < symbols.size(); ++j)
-                {
-                    PrecType dis = zMinusSharedPathDotProduct - R(2 * Detection::TxAntNum - 1 - layer, 2 * Detection::TxAntNum - 1 - layer) * QAM::symbolsRD[j];
-                    candidates[i * symbols.size() + j] = currentSurvivePathPED[i] + dis * dis;
-                }
-            }
-
-            auto minIndices = findSmallestKIndices<K>(candidates, currntSurvivePathNum * symbols.size());
-            currntSurvivePathNum = minIndices.size();
-
-            // 将存活路径拷贝进survivors，将新的PED存入currentSurvivePathPED
-            size_t newSurvivePathNum = minIndices.size();
-
-            // copy survivors to survivorsCopy
-            for (size_t i = 0; i < currntSurvivePathNum; ++i)
-            {
-                for (int j = 0; j < layer; ++j)
-                {
-                    survivorsCopy[i][j] = survivors[i][j];
-                }
-            }
-
-            for (size_t i = 0; i < newSurvivePathNum; ++i)
-            {
-                size_t index = minIndices[i];
-                size_t pathIndex = index / symbols.size();
-                size_t symbolIndex = index % symbols.size();
-
-                for (int j = 0; j < layer; ++j)
-                {
-                    survivors[i][j] = survivorsCopy[pathIndex][j];
-                }
-                survivors[i][layer] = symbols[symbolIndex];
-
-                currentSurvivePathPED[i] = candidates[index];
-            }
-        }
-
-        Eigen::Vector<PrecType, 2 * Detection::TxAntNum> result;
-        for (int i = 0; i < 2 * Detection::TxAntNum; ++i)
-        {
-            result[i] = survivors[0][2 * Detection::TxAntNum - 1 - i];
-        }
-        return result;
-
-
-    }
-
- 
+  constexpr auto operator==(tx_count const &) const -> bool = default;
 };
 
+struct rx_count {
+  std::size_t value;
 
-// ------------------- EP (Expectation Propagation) -------------------
+  [[nodiscard]] constexpr explicit operator std::size_t() const noexcept {
+    return value;
+  }
 
-template <typename Detection, size_t IterNum = 10>
-class EP
-{
-public:
-    using QAM = typename Detection::ModType;
-    using PrecType = typename Detection::PrecType;
-
-    static constexpr auto TxAntNum = Detection::TxAntNum;
-    static constexpr auto RxAntNum = Detection::RxAntNum;
-    static constexpr size_t N = 2 * TxAntNum;            // 实数域维度
-    static constexpr size_t slen = QAM::symbolsRD.size(); // 每个实数维度的星座点数
-
-    // run() 内同时存在多个 N×N 矩阵 (HtH_over_Nv, Sigma_q, A, 逆矩阵临时量)
-    // 保守地限制单个 N×N 矩阵不超过 32KB，从而 ~4 个矩阵不超出 Eigen 128KB 栈限制
-    static constexpr bool heapAlloc = (N * N * sizeof(PrecType)) > 32768;
-
-    using VectorN  = Eigen::Matrix<PrecType, N, 1>;
-    using MatrixNN = std::conditional_t<heapAlloc,
-                                        Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>,
-                                        Eigen::Matrix<PrecType, N, N>>;
-    // N x slen 概率矩阵（各行对应天线维度，各列对应星座点）
-    using MatrixNS = std::conditional_t<heapAlloc,
-                                        Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>,
-                                        Eigen::Matrix<PrecType, N, slen>>;
-    // slen 长度的行向量 / 列向量
-    using VectorS  = Eigen::Matrix<PrecType, slen, 1>;
-
-    // 阻尼因子（运行时可调）
-    PrecType delta = static_cast<PrecType>(0.7);
-
-    auto run(const Detection& det)
-    {
-        const auto& H  = det.H;
-        const auto& y  = det.RxSymbols;
-        const PrecType Nv = static_cast<PrecType>(det.Nv);
-
-        // 星座符号向量（编译期常量 → 运行期 Eigen 向量）
-        const auto sym = Eigen::Map<const VectorS>(QAM::symbolsRD.data());
-        // sym^2
-        const VectorS sym2 = sym.array().square();
-
-        // --- 初始化 ---
-        VectorN Alpha     = VectorN::Constant(static_cast<PrecType>(2));
-        VectorN Gamma     = VectorN::Zero();
-        VectorN Alpha_new = VectorN::Zero();
-        VectorN Gamma_new = VectorN::Zero();
-
-        // 预计算 H^T H / Nv 和 H^T y / Nv（不随迭代改变）
-        MatrixNN HtH_over_Nv;
-        VectorN  Hty_over_Nv;
-        if constexpr (heapAlloc)
-            HtH_over_Nv.resize(N, N);
-        HtH_over_Nv.noalias() = H.transpose() * H / Nv;
-        Hty_over_Nv.noalias() = H.transpose() * y / Nv;
-
-        // 后验分布参数
-        MatrixNN Sigma_q;
-        VectorN  Mu_q;
-        if constexpr (heapAlloc)
-            Sigma_q.resize(N, N);
-
-        // 概率矩阵 prob(N, slen)
-        MatrixNS prob;
-        if constexpr (heapAlloc)
-            prob.resize(N, slen);
-
-        // 计算后验分布（复用于初始化和每次迭代末尾）
-        auto computePosterior = [&]()
-        {
-            MatrixNN A = HtH_over_Nv;
-            A.diagonal() += Alpha;
-            Sigma_q = A.inverse();
-            Mu_q.noalias() = Sigma_q * (Hty_over_Nv + Gamma);
-        };
-
-        // 以 MMSE 结果作为预处理
-        computePosterior();
-
-        constexpr PrecType var_floor   = static_cast<PrecType>(5e-7);
-        constexpr PrecType alpha_floor = static_cast<PrecType>(5e-7);
-
-        // --- EP 迭代 ---
-        for (size_t iter = 0; iter < IterNum; ++iter)
-        {
-            // ---- 腔分布参数（全向量化） ----
-            const VectorN sig = Sigma_q.diagonal();
-            const VectorN h2  = sig.array() / (static_cast<PrecType>(1) - sig.array() * Alpha.array());
-            const VectorN t   = h2.array() * (Mu_q.array() / sig.array() - Gamma.array());
-
-            // ---- 概率矩阵 prob(N, slen) = exp(-(t - sym')^2 / (2*h2)) ----
-            // diff(i,j) = t(i) - sym(j)   →  t * 1^T - 1 * sym^T
-            // prob(i,j) = -diff^2 / (2*h2(i))
-            //  = -(t(i)-sym(j))^2 / (2*h2(i))
-            // 先构造平方距离矩阵，再按行除以 2*h2
-            //   dist2 = (t * ones^T - ones * sym^T).^2
-            // 利用展开:  (t-s)^2 = t^2 - 2*t*s + s^2
-            //   dist2 = t^2*1^T - 2*t*sym^T + 1*sym2^T
-            const VectorN t2  = t.array().square();
-            const VectorN inv2h2 = (static_cast<PrecType>(2) * h2.array()).inverse();
-
-            // prob(i,j) = -(t2(i) - 2*t(i)*sym(j) + sym2(j)) / (2*h2(i))
-            // 展开为三个 rank-1 项，避免显式构造 N×slen 的差矩阵
-            // term1(i,j) = -t2(i) * inv2h2(i)                (仅与 i 有关)
-            // term2(i,j) =  2*t(i)*inv2h2(i) * sym(j) = tinv(i)*sym(j)
-            // term3(i,j) = -sym2(j) * inv2h2(i)              (外积)
-            const VectorN c1   = (-t2.array() * inv2h2.array()).matrix();     // N×1
-            const VectorN tinv = (t.array() * inv2h2.array()).matrix();       // N×1  (已含 *2 因为 inv2h2 = 1/(2h2))
-            // prob = c1*1^T + tinv*sym^T*2  − inv2h2*sym2^T   ... 但 tinv 已含 /2h2
-            // 直接用矩阵运算一步构造:
-            //   prob = c1 * ones_row  +  2 * tinv * sym^T  -  inv2h2 * sym2^T
-            // 但 tinv = t/(2h2)，需要 2*tinv = t/h2
-            // 重新整理，最清晰的做法：
-            //   logP(i,j) = -inv2h2(i) * (t(i) - sym(j))^2
-            //             = -inv2h2(i)*t2(i) + 2*inv2h2(i)*t(i)*sym(j) - inv2h2(i)*sym2(j)
-            // 写成矩阵：  logP = c1*1^T + (2*tinv)*sym^T - inv2h2*sym2^T
-            const VectorN tinv2 = (static_cast<PrecType>(2) * tinv.array()).matrix();
-
-            prob.noalias() = c1.replicate(1, slen)
-                           + tinv2 * sym.transpose()
-                           - inv2h2 * sym2.transpose();
-
-            // log-sum-exp 数值稳定化：每行减去行最大值
-            const VectorN row_max = prob.rowwise().maxCoeff();
-            prob.colwise() -= row_max;
-
-            // exp 与行归一化
-            prob = prob.array().exp();
-            const VectorN row_sum = prob.rowwise().sum();
-            prob.array().colwise() /= row_sum.array();
-
-            // ---- 替代分布的均值和方差（矩阵-向量乘法） ----
-            // mu_p     = prob * sym         (N×1)
-            // sigma2_p = prob * sym2 - mu_p^2
-            const VectorN mu_p     = (prob * sym);
-            VectorN sigma2_p       = (prob * sym2) - mu_p.array().square().matrix();
-            sigma2_p = sigma2_p.cwiseMax(var_floor);
-
-            // ---- 自然参数更新（全向量化） ----
-            const VectorN tempAlpha = sigma2_p.array().inverse() - h2.array().inverse();
-            const VectorN tempGamma = mu_p.array() / sigma2_p.array() - t.array() / h2.array();
-
-            // 仅更新精度为正的分量 (向量化选择)
-            const auto mask = (tempAlpha.array() > alpha_floor);
-            Alpha_new = mask.select(tempAlpha, Alpha_new);
-            Gamma_new = mask.select(tempGamma, Gamma_new);
-
-            // 阻尼
-            Alpha = delta * Alpha_new + (static_cast<PrecType>(1) - delta) * Alpha;
-            Gamma = delta * Gamma_new + (static_cast<PrecType>(1) - delta) * Gamma;
-
-            // 更新后验
-            computePosterior();
-        }
-
-        // --- 硬判决：选择最近星座点（向量化） ---
-        // dist(i,j) = |Mu_q(i) - sym(j)|  →  找每行最小
-        // 展开为  (Mu_q - sym')^2  的 argmin
-        MatrixNS dist2;
-        if constexpr (heapAlloc)
-            dist2.resize(N, slen);
-        dist2 = (Mu_q.replicate(1, slen) - sym.transpose().replicate(N, 1)).array().square();
-
-        Eigen::Vector<PrecType, 2 * TxAntNum> result;
-        for (Eigen::Index i = 0; i < static_cast<Eigen::Index>(N); ++i)
-        {
-            Eigen::Index minIdx;
-            dist2.row(i).minCoeff(&minIdx);
-            result(i) = QAM::symbolsRD[minIdx];
-        }
-
-        return result;
-    }
+  constexpr auto operator==(rx_count const &) const -> bool = default;
 };
 
+struct snr_db {
+  double value;
 
-template <typename Detection>
-class SphereDecoder
-{
+  [[nodiscard]] constexpr explicit operator double() const noexcept {
+    return value;
+  }
+
+  constexpr auto operator==(snr_db const &) const -> bool = default;
+};
+
+[[nodiscard]] consteval auto operator""_Tx(unsigned long long value)
+    -> tx_count {
+  if (value == 0 || value > std::numeric_limits<std::size_t>::max()) {
+    throw "_Tx expects a positive antenna count representable by size_t";
+  }
+  return {static_cast<std::size_t>(value)};
+}
+
+[[nodiscard]] consteval auto operator""_Rx(unsigned long long value)
+    -> rx_count {
+  if (value == 0 || value > std::numeric_limits<std::size_t>::max()) {
+    throw "_Rx expects a positive antenna count representable by size_t";
+  }
+  return {static_cast<std::size_t>(value)};
+}
+
+[[nodiscard]] consteval auto operator""_dB(unsigned long long value) -> snr_db {
+  return {static_cast<double>(value)};
+}
+
+[[nodiscard]] consteval auto operator""_dB(long double value) -> snr_db {
+  if (value > std::numeric_limits<double>::max()) {
+    throw "_dB value is not representable by double";
+  }
+  return {static_cast<double>(value)};
+}
+
+[[nodiscard]] constexpr auto operator+(snr_db value) noexcept -> snr_db {
+  return value;
+}
+
+[[nodiscard]] constexpr auto operator-(snr_db value) noexcept -> snr_db {
+  return {-value.value};
+}
+
+} // namespace Kito::literals
+
+namespace Kito {
+
+template <std::floating_point Scalar> struct qam16 {
+  using scalar_type = Scalar;
+
+  inline static constexpr std::size_t bits_per_complex_symbol = 4;
+  inline static constexpr std::size_t bits_per_axis = 2;
+  inline static constexpr std::array<Scalar, 4> symbols{
+      static_cast<Scalar>(-0.31622776601683794),
+      static_cast<Scalar>(-0.9486832980505138),
+      static_cast<Scalar>(0.31622776601683794),
+      static_cast<Scalar>(0.9486832980505138)};
+};
+
+template <std::floating_point Scalar> struct qam64 {
+  using scalar_type = Scalar;
+
+  inline static constexpr std::size_t bits_per_complex_symbol = 6;
+  inline static constexpr std::size_t bits_per_axis = 3;
+  inline static constexpr std::array<Scalar, 8> symbols{
+      static_cast<Scalar>(-0.4629100498862757),
+      static_cast<Scalar>(-0.1543033499620919),
+      static_cast<Scalar>(-0.7715167498104595),
+      static_cast<Scalar>(-1.0801234497346432),
+      static_cast<Scalar>(0.1543033499620919),
+      static_cast<Scalar>(0.4629100498862757),
+      static_cast<Scalar>(0.7715167498104595),
+      static_cast<Scalar>(1.0801234497346432)};
+};
+
+template <std::floating_point Scalar> struct qam256 {
+  using scalar_type = Scalar;
+
+  inline static constexpr std::size_t bits_per_complex_symbol = 8;
+  inline static constexpr std::size_t bits_per_axis = 4;
+  inline static constexpr std::array<Scalar, 16> symbols{
+      static_cast<Scalar>(-0.3834824944236852),
+      static_cast<Scalar>(-0.5368754921931592),
+      static_cast<Scalar>(-0.2300894966542111),
+      static_cast<Scalar>(-0.07669649888473704),
+      static_cast<Scalar>(-0.8436614877321074),
+      static_cast<Scalar>(-0.6902684899626333),
+      static_cast<Scalar>(-0.9970544855015815),
+      static_cast<Scalar>(-1.1504474832710556),
+      static_cast<Scalar>(0.3834824944236852),
+      static_cast<Scalar>(0.5368754921931592),
+      static_cast<Scalar>(0.2300894966542111),
+      static_cast<Scalar>(0.07669649888473704),
+      static_cast<Scalar>(0.8436614877321074),
+      static_cast<Scalar>(0.6902684899626333),
+      static_cast<Scalar>(0.9970544855015815),
+      static_cast<Scalar>(1.1504474832710556)};
+};
+
+template <typename Modulation>
+concept qam_modulation = requires {
+  typename Modulation::scalar_type;
+  requires std::floating_point<typename Modulation::scalar_type>;
+  { Modulation::bits_per_complex_symbol } -> std::convertible_to<std::size_t>;
+  { Modulation::bits_per_axis } -> std::convertible_to<std::size_t>;
+  { Modulation::symbols.size() } -> std::convertible_to<std::size_t>;
+  {
+    Modulation::symbols[std::size_t{0}]
+  } -> std::convertible_to<typename Modulation::scalar_type>;
+};
+
+namespace detail {
+
+[[nodiscard]] consteval auto binary_alphabet_size(std::size_t bits)
+    -> std::size_t {
+  if (bits >= std::numeric_limits<std::size_t>::digits) {
+    return 0;
+  }
+  return std::size_t{1} << bits;
+}
+
+} // namespace detail
+
+template <literals::tx_count Tx, literals::rx_count Rx,
+          qam_modulation Modulation>
+struct model {
+  using scalar_type = typename Modulation::scalar_type;
+  using modulation_type = Modulation;
+  using symbol_table_type = std::remove_cvref_t<decltype(Modulation::symbols)>;
+
+  inline static constexpr auto tx = Tx;
+  inline static constexpr auto rx = Rx;
+  inline static constexpr std::size_t tx_antennas = Tx.value;
+  inline static constexpr std::size_t rx_antennas = Rx.value;
+  inline static constexpr std::size_t tx_dimensions = 2 * tx_antennas;
+  inline static constexpr std::size_t rx_dimensions = 2 * rx_antennas;
+  inline static constexpr std::size_t N = tx_dimensions;
+  inline static constexpr std::size_t M = rx_dimensions;
+  inline static constexpr std::size_t bits_per_axis = Modulation::bits_per_axis;
+  inline static constexpr std::size_t bits_per_complex_symbol =
+      Modulation::bits_per_complex_symbol;
+  inline static constexpr std::size_t bits_per_frame =
+      tx_antennas * Modulation::bits_per_complex_symbol;
+  inline static constexpr auto const &symbols = Modulation::symbols;
+
+  static_assert(tx_antennas > 0 && rx_antennas > 0,
+                "a MIMO model needs at least one Tx and one Rx antenna");
+  static_assert(
+      tx_antennas <=
+              static_cast<std::size_t>(std::numeric_limits<int>::max()) / 2 &&
+          rx_antennas <=
+              static_cast<std::size_t>(std::numeric_limits<int>::max()) / 2,
+      "real-extended Eigen dimensions must be representable by int");
+  static_assert(Modulation::bits_per_axis > 0 &&
+                    Modulation::bits_per_axis <
+                        std::numeric_limits<std::size_t>::digits,
+                "bits_per_axis must describe a representable binary alphabet");
+  static_assert(Modulation::bits_per_complex_symbol ==
+                    2 * Modulation::bits_per_axis,
+                "a real-extended QAM model needs equal I/Q bit widths");
+  static_assert(Modulation::symbols.size() ==
+                    detail::binary_alphabet_size(Modulation::bits_per_axis),
+                "the PAM alphabet must cover every per-axis bit pattern");
+
+  using H_type = Eigen::Matrix<scalar_type, static_cast<int>(rx_dimensions),
+                               static_cast<int>(tx_dimensions)>;
+  using X_type = Eigen::Matrix<scalar_type, static_cast<int>(tx_dimensions), 1>;
+  using Y_type = Eigen::Matrix<scalar_type, static_cast<int>(rx_dimensions), 1>;
+  using truth_type =
+      Eigen::Matrix<std::size_t, static_cast<int>(tx_dimensions), 1>;
+
+  using h_type = H_type;
+  using x_type = X_type;
+  using y_type = Y_type;
+};
+
+namespace detail {
+
+template <typename Model> struct channel_state {
+  using H_type = typename Model::H_type;
+
+  explicit channel_state(H_type value) : h{std::move(value)} {}
+
+  H_type const h;
+};
+
+} // namespace detail
+
+template <typename Model> class channel;
+
+template <typename Model> class frame {
 public:
-    // 从Detection模板中提取类型别名和常量
-    using QAM = typename Detection::ModType;
-    using PrecType = typename Detection::PrecType;
-    static constexpr auto TxAntNum = Detection::TxAntNum;
-    static constexpr auto RxAntNum = Detection::RxAntNum;
-    static constexpr size_t N = 2 * TxAntNum; // 实数域下的维度
+  using model_type = Model;
+  using channel_type = channel<model_type>;
+  using scalar_type = typename model_type::scalar_type;
+  using modulation_type = typename model_type::modulation_type;
+  using H_type = typename model_type::H_type;
+  using X_type = typename model_type::X_type;
+  using Y_type = typename model_type::Y_type;
+  using truth_type = typename model_type::truth_type;
+  using channel_state_type = detail::channel_state<model_type>;
+  using h_type = H_type;
+  using x_type = X_type;
+  using y_type = Y_type;
 
-    // 矩阵存储
-    inline static constexpr bool heapAlloc = TxAntNum * RxAntNum >= 64 * 64;
-    using R_type = std::conditional_t<heapAlloc,
-                                      Eigen::Matrix<PrecType, Eigen::Dynamic, Eigen::Dynamic>,
-                                      Eigen::Matrix<PrecType, N, N>>;
-    using Z_type = Eigen::Matrix<PrecType, N, 1>;
-    // 使用Eigen的PermutationMatrix来处理列交换
-    using P_type = Eigen::PermutationMatrix<N, N>;
+  [[nodiscard]] auto h(this frame const &self) noexcept -> H_type const & {
+    return self.channel_state_->h;
+  }
 
+  auto h(this frame &&) -> H_type const & = delete;
+  auto h(this frame const &&) -> H_type const & = delete;
 
-    R_type R;
-    Z_type z;
-    P_type P_; // 存储最优排序的置换矩阵
+  [[nodiscard]] auto y(this frame const &self) noexcept -> Y_type const & {
+    return self.y_;
+  }
 
-    size_t nodes;
-    bool cheat_mode = true;
+  auto y(this frame &&) -> Y_type const & = delete;
+  auto y(this frame const &&) -> Y_type const & = delete;
+
+  [[nodiscard]] auto tx(this frame const &self) noexcept -> X_type const & {
+    return self.tx_;
+  }
+
+  auto tx(this frame &&) -> X_type const & = delete;
+  auto tx(this frame const &&) -> X_type const & = delete;
+
+  [[nodiscard]] auto truth(this frame const &self) noexcept
+      -> truth_type const & {
+    return self.truth_;
+  }
+
+  auto truth(this frame &&) -> truth_type const & = delete;
+  auto truth(this frame const &&) -> truth_type const & = delete;
+
+  [[nodiscard]] auto noise_variance(this frame const &self) noexcept
+      -> scalar_type {
+    return self.noise_variance_;
+  }
 
 private:
-    // 内部成员变量，用于搜索过程
-    PrecType radius_sq_;
-    Eigen::Matrix<PrecType, N, 1> best_solution_; // 存储找到的最佳解 (在置换域)
-    Eigen::Matrix<PrecType, N, 1> current_path_;
-    const decltype(QAM::symbolsRD)& symbols_;
-    Z_type partial_sums_incremental_;
+  friend class channel<model_type>;
 
-public:
-    // 构造函数
-    SphereDecoder() : symbols_(QAM::symbolsRD) {}
+  frame(std::shared_ptr<channel_state_type const> source, Y_type y_value,
+        X_type tx_value,
+        truth_type truth_value, scalar_type noise_variance)
+      : channel_state_{std::move(source)}, y_{std::move(y_value)},
+        tx_{std::move(tx_value)}, truth_{std::move(truth_value)},
+        noise_variance_{noise_variance} {}
 
-    auto run(const Detection &det)
-    {
-        nodes = 0;
-        // 核心优化：执行两阶段QR分解来找到并应用最优排序
-        initializePermutedQR(det);
-        findInitialRadius(det); 
-        search();
-        // 关键：返回结果前，需要将解从置换域逆置换回原始域
-        return P_ * best_solution_;
-    }
-
-private:
-    /**
-     * @brief 执行两阶段QR分解以实现基于真实噪声的“神谕排序”。
-     *        取代了原有的 initializeQR 函数。
-     */
-    void initializePermutedQR(const Detection &det)
-    {
-        // --- 阶段 1: 第一次QR，目的是计算可靠性度量 ---
-        
-        // 1a. 对原始 H 进行标准QR分解
-        Eigen::HouseholderQR<typename Detection::H_type> qr1(det.H);
-        R_type R1 = qr1.matrixQR().template triangularView<Eigen::Upper>();
-        auto Q1 = qr1.householderQ();
-
-        // 在 Rx > Tx 的情况下，R1需要被截断以保持方阵
-        if constexpr (RxAntNum > TxAntNum) {
-            R1 = R1.topRows(N);
-        }
-
-        // 1b. 计算真实噪声并变换到Q域
-        Z_type true_noise = det.RxSymbols - det.H * det.TxSymbols;
-        Z_type n_prime = (Q1.transpose() * true_noise).head(N);
-
-        // 1c. 计算每个符号的可靠性度量
-        std::vector<std::pair<PrecType, int>> metrics(N);
-        for (int k = 0; k < N; ++k) {
-            // 度量是误差项的大小。值越小，符号越可靠。
-            // 加上一个很小的数防止除以零
-            metrics[k] = {std::abs(n_prime(k) / (R1(k, k) + 1e-12)), k};
-        }
-
-        // --- 阶段 2: 排序并执行第二次QR ---
-
-        // 2a. 对度量进行排序，最可靠的（值最小的）排在最前面
-        std::sort(metrics.begin(), metrics.end());
-
-        // 2b. 构建置换矩阵P_。
-        // 我们希望最可靠的符号最后解码（即在回溯时最先处理，索引为N-1）。
-        // Eigen的PermutationMatrix构造函数需要一个索引向量，其中perm_indices(i)是移动到位置i的原始列的索引。
-        Eigen::Vector<int, N> perm_indices;
-        for (int j = 0; j < N; ++j) {
-            // 将第j个最可靠的符号（原始索引为metrics[j].second）
-            // 移动到新的索引 (N - 1 - j) 的位置。
-            perm_indices(N - 1 - j) = metrics[j].second;
-        }
-        P_ = P_type(perm_indices);
-
-        // 2c. 应用置换并执行第二次QR分解
-        typename Detection::H_type H_permuted = det.H * P_;
-        Eigen::HouseholderQR<typename Detection::H_type> qr2(H_permuted);
-
-        // 将最终的 R 和 z 存储到类成员中
-        R = qr2.matrixQR().template triangularView<Eigen::Upper>();
-        z = qr2.householderQ().transpose() * det.RxSymbols;
-        
-        // 同样，处理 Rx > Tx 的情况
-        if constexpr (RxAntNum > TxAntNum) {
-            R = R.topRows(N);
-            z = z.head(N);
-        }
-    }
-
-    void findInitialRadius(const Detection& det)
-    {
-        if (cheat_mode)
-        {
-            // --- 作弊模式逻辑 ---
-            // 对真实的发送符号进行同样的置换，以匹配排序后的信道
-            Z_type permuted_tx_symbols = P_.transpose() * det.TxSymbols;
-
-            // 初始最佳解是在置换域中的解
-            best_solution_ = permuted_tx_symbols;
-            
-            // 基于置换后的真实解计算初始半径
-            // 注意：这里的 z 和 R 是第二次QR分解的结果
-            radius_sq_ = (z - R * best_solution_).squaredNorm() * 1.01;
-        }
-        else
-        {
-            // --- 正常模式逻辑 (也需要工作在置换域) ---
-            // 正常模式的ZF-SIC（或其他）初始解也应该在排序后的 H_p 上进行
-            Z_type initial_solution;
-            Z_type temp_z = z; 
-
-            for (int k = N - 1; k >= 0; --k)
-            {
-                PrecType center = temp_z(k) / R(k, k);
-                
-                PrecType min_dist_sq = std::numeric_limits<PrecType>::max();
-                PrecType best_symbol = symbols_[0];
-
-                for (const auto& symbol : symbols_)
-                {
-                    PrecType dist_sq = std::pow(center - symbol, 2);
-                    if (dist_sq < min_dist_sq)
-                    {
-                        min_dist_sq = dist_sq;
-                        best_symbol = symbol;
-                    }
-                }
-                initial_solution(k) = best_symbol;
-                
-                for (int i = 0; i < k; ++i)
-                {
-                    temp_z(i) -= R(i, k) * initial_solution(k);
-                }
-            }
-
-            best_solution_ = initial_solution;
-            radius_sq_ = (z - R * best_solution_).squaredNorm();
-        }
-    }
-
- 
-    void search()
-    {
-        std::vector<std::vector<int>> order(N);
-        std::vector<int> idx(N, 0);
-        std::vector<PrecType> ped(N + 1, PrecType(0));
-        
-        partial_sums_incremental_.setZero();
-
-        int k = static_cast<int>(N) - 1;
-
-        while (true)
-        {
-            if (order[k].empty())
-            {
-                PrecType center = (z(k) - partial_sums_incremental_(k)) / R(k, k);
-
-                std::vector<std::pair<int, PrecType>> tmp; 
-                tmp.reserve(symbols_.size());
-                for (int si = 0; si < static_cast<int>(symbols_.size()); ++si)
-                {
-                    PrecType d = symbols_[si] - center;
-                    tmp.emplace_back(si, d * d);
-                }
-                std::sort(tmp.begin(), tmp.end(), [](auto &a, auto &b){ return a.second < b.second; });
-                
-                order[k].reserve(tmp.size());
-                for (auto &p : tmp) order[k].push_back(p.first);
-            }
-
-            if (idx[k] < static_cast<int>(order[k].size()))
-            {
-                int si = order[k][idx[k]];
-                PrecType symbol = symbols_[si];
-                
-                PrecType diff = z(k) - partial_sums_incremental_(k) - R(k, k) * symbol;
-                PrecType new_ped = ped[k + 1] + diff * diff;
-
-                nodes++;
-
-                if (new_ped < radius_sq_)
-                {
-                    current_path_(k) = symbol;
-                    ped[k] = new_ped;
-
-                    if (k == 0)
-                    {
-                        best_solution_ = current_path_;
-                        radius_sq_ = new_ped;
-                        ++idx[k];
-                    }
-                    else
-                    {
-                        for (int i = 0; i < k; ++i) {
-                            partial_sums_incremental_(i) += R(i, k) * current_path_(k);
-                        }
-                        --k;
-                        idx[k] = 0;
-                        order[k].clear();
-                    }
-                }
-                else
-                {
-                    ++idx[k];
-                }
-            }
-            else
-            {
-                if (k == static_cast<int>(N) - 1)
-                {
-                    break; 
-                }
-                else
-                {
-                    ++k;
-                    for (int i = 0; i < k; ++i) {
-                         partial_sums_incremental_(i) -= R(i, k) * current_path_(k);
-                    }
-                    ++idx[k];
-                }
-            }
-        }
-    }
+  std::shared_ptr<channel_state_type const> const channel_state_;
+  Y_type const y_;
+  X_type const tx_;
+  truth_type const truth_;
+  scalar_type const noise_variance_;
 };
 
+template <typename Model> class channel {
+public:
+  using model_type = Model;
+  using frame_type = frame<model_type>;
+  using scalar_type = typename model_type::scalar_type;
+  using modulation_type = typename model_type::modulation_type;
+  using H_type = typename model_type::H_type;
+  using X_type = typename model_type::X_type;
+  using Y_type = typename model_type::Y_type;
+  using truth_type = typename model_type::truth_type;
+  using channel_state_type = detail::channel_state<model_type>;
+  using h_type = H_type;
+  using x_type = X_type;
+  using y_type = Y_type;
 
+  explicit channel(H_type h_value)
+      : state_{std::make_shared<channel_state_type const>(
+            std::move(h_value))} {}
+
+  channel(channel const &) = default;
+  channel(channel &&) = default;
+  auto operator=(channel const &) -> channel & = delete;
+  auto operator=(channel &&) -> channel & = delete;
+
+  [[nodiscard]] auto h(this channel const &self) noexcept -> H_type const & {
+    return self.state_->h;
+  }
+
+  auto h(this channel &&) -> H_type const & = delete;
+  auto h(this channel const &&) -> H_type const & = delete;
+
+  [[nodiscard]] auto sample(this channel const &self, literals::snr_db snr)
+      -> frame_type {
+    truth_type truth;
+    X_type tx;
+
+    for (std::size_t dimension = 0; dimension < model_type::tx_dimensions;
+         ++dimension) {
+      const auto index =
+          random_integer<std::size_t>(0, modulation_type::symbols.size() - 1);
+      truth[static_cast<Eigen::Index>(dimension)] = index;
+      tx[static_cast<Eigen::Index>(dimension)] =
+          modulation_type::symbols[index];
+    }
+
+    return synthesize(self, std::move(tx), std::move(truth), snr);
+  }
+
+  [[nodiscard]] auto transmit(this channel const &self,
+                              std::span<bool const> bits, literals::snr_db snr)
+      -> frame_type {
+    if (bits.size() != model_type::bits_per_frame) {
+      throw std::invalid_argument{
+          "channel::transmit: bit count does not match the MIMO model"};
+    }
+
+    truth_type truth;
+    X_type tx;
+
+    for (std::size_t dimension = 0; dimension < model_type::tx_dimensions;
+         ++dimension) {
+      std::size_t index = 0;
+      const auto offset = dimension * modulation_type::bits_per_axis;
+      for (std::size_t bit = 0; bit < modulation_type::bits_per_axis; ++bit) {
+        index = (index << 1) | static_cast<std::size_t>(bits[offset + bit]);
+      }
+      truth[static_cast<Eigen::Index>(dimension)] = index;
+      tx[static_cast<Eigen::Index>(dimension)] =
+          modulation_type::symbols[index];
+    }
+
+    return synthesize(self, std::move(tx), std::move(truth), snr);
+  }
+
+private:
+  [[nodiscard]] static auto noise_variance_for(literals::snr_db snr)
+      -> scalar_type {
+    if (!std::isfinite(snr.value)) {
+      throw std::invalid_argument{"channel: SNR must be finite"};
+    }
+
+    const auto linear_snr = std::pow(10.0, snr.value / 10.0);
+    const auto numerator = static_cast<double>(model_type::tx_antennas) *
+                           static_cast<double>(model_type::rx_antennas);
+    const auto denominator =
+        linear_snr *
+        static_cast<double>(modulation_type::bits_per_complex_symbol) *
+        static_cast<double>(model_type::tx_antennas);
+    const auto variance = numerator / denominator;
+
+    if (!(variance > 0.0) || !std::isfinite(variance)) {
+      throw std::invalid_argument{
+          "channel: SNR produces an invalid noise variance"};
+    }
+
+    const auto converted = static_cast<scalar_type>(variance);
+    if (!(converted > scalar_type{0}) || !std::isfinite(converted)) {
+      throw std::invalid_argument{
+          "channel: noise variance is not representable by the scalar type"};
+    }
+    return converted;
+  }
+
+  [[nodiscard]] static auto synthesize(channel const &source, X_type tx,
+                                       truth_type truth, literals::snr_db snr)
+      -> frame_type {
+    const auto variance = noise_variance_for(snr);
+    const auto noise_standard_deviation = std::sqrt(variance / scalar_type{2});
+
+    Y_type y = source.state_->h * tx;
+    for (Eigen::Index dimension = 0; dimension < y.size(); ++dimension) {
+      y[dimension] +=
+          random_normal<scalar_type>(scalar_type{0}, noise_standard_deviation);
+    }
+
+    return frame_type{source.state_, std::move(y), std::move(tx),
+                      std::move(truth), variance};
+  }
+
+  std::shared_ptr<channel_state_type const> const state_;
+};
+
+template <literals::tx_count Tx, literals::rx_count Rx,
+          qam_modulation Modulation>
+class mimo {
+public:
+  using model_type = model<Tx, Rx, Modulation>;
+  using channel_type = channel<model_type>;
+  using scalar_type = typename model_type::scalar_type;
+  using H_type = typename model_type::H_type;
+
+  [[nodiscard]] auto draw(this mimo const &) -> channel_type {
+    H_type h;
+    constexpr auto component_standard_deviation =
+        static_cast<scalar_type>(0.7071067811865475244);
+
+    for (std::size_t column = 0; column < model_type::tx_antennas; ++column) {
+      for (std::size_t row = 0; row < model_type::rx_antennas; ++row) {
+        const auto real = random_normal<scalar_type>(
+            scalar_type{0}, component_standard_deviation);
+        const auto imaginary = random_normal<scalar_type>(
+            scalar_type{0}, component_standard_deviation);
+
+        const auto r = static_cast<Eigen::Index>(row);
+        const auto c = static_cast<Eigen::Index>(column);
+        const auto rx = static_cast<Eigen::Index>(model_type::rx_antennas);
+        const auto tx = static_cast<Eigen::Index>(model_type::tx_antennas);
+
+        h(r, c) = real;
+        h(r + rx, c + tx) = real;
+        h(r, c + tx) = imaginary;
+        h(r + rx, c) = -imaginary;
+      }
+    }
+
+    return channel_type{std::move(h)};
+  }
+};
+
+} // namespace Kito
+
+// -----------------------------------------------------------------------------
+// Lazy typed evaluator
+// -----------------------------------------------------------------------------
+
+namespace Kito {
+
+// Besides documenting the type-only recipe contract, this base makes Kito an
+// associated namespace for ADL. A detector in any user namespace can therefore
+// participate in `detector >> custom_transfer` without a using-directive.
+struct detector_recipe {};
+
+} // namespace Kito
+
+namespace Kito::graph {
+
+template <typename Node>
+inline constexpr bool is_source_v = [] {
+  if constexpr (requires { Node::is_source; })
+    return static_cast<bool>(Node::is_source);
+  else
+    return false;
+}();
+
+namespace detail {
+
+template <typename Node>
+struct is_recipe : std::bool_constant<!is_source_v<Node>> {};
+
+template <typename Node, typename Environment, bool = is_source_v<Node>>
+struct result_type;
+
+template <typename Node, typename Environment>
+struct result_type<Node, Environment, false> {
+  using type =
+      std::remove_cvref_t<typename Node::template result<Environment>>;
+};
+
+template <typename Node, typename Environment>
+struct result_type<Node, Environment, true> {
+  using type = std::remove_cvref_t<
+      decltype(Node::read(std::declval<Environment const &>()))>;
+};
+
+template <typename Node, typename Environment>
+using result_t = typename result_type<Node, Environment>::type;
+
+template <typename Node, typename Environment, typename Dependencies>
+struct computes_recipe : std::false_type {};
+
+template <typename Node, typename Environment, typename... Dependencies>
+struct computes_recipe<Node, Environment,
+                       meta::type_list<Dependencies...>> {
+  inline static constexpr bool value =
+      requires(Environment const &environment,
+               result_t<Dependencies, Environment> const &...inputs) {
+        { Node::compute(environment, inputs...) } ->
+            std::same_as<result_t<Node, Environment>>;
+      };
+};
+
+template <typename Node, typename Environment> struct slot {
+  std::optional<result_t<Node, Environment>> value;
+};
+
+template <typename Environment, typename Nodes> struct cache;
+
+template <typename Environment, typename... Nodes>
+struct cache<Environment, meta::type_list<Nodes...>> {
+  std::tuple<slot<Nodes, Environment>...> slots;
+};
+
+} // namespace detail
+
+template <typename Node, typename Environment>
+using result_t = detail::result_t<Node, Environment>;
+
+template <typename Node, typename Environment>
+concept recipe_for =
+    !is_source_v<Node> && requires { typename Node::dependencies; } &&
+    detail::computes_recipe<Node, Environment,
+                            typename Node::dependencies>::value;
+
+template <typename Environment, typename Roots> class evaluator {
+public:
+  using environment_type = Environment;
+  using roots = Roots;
+  using closure = meta::dependency_closure_t<roots>;
+  using recipes = meta::filter_t<detail::is_recipe, closure>;
+
+  explicit constexpr evaluator(const Environment &environment) noexcept
+      : environment_(environment) {}
+
+  evaluator(Environment &&) = delete;
+
+  evaluator(const evaluator &) = delete;
+  evaluator &operator=(const evaluator &) = delete;
+
+  template <typename Node> constexpr decltype(auto) get() {
+    static_assert(meta::contains_v<Node, closure>,
+                  "Kito::graph::evaluator::get<Node>: Node is not reachable "
+                  "from this evaluator's roots");
+
+    if constexpr (is_source_v<Node>) {
+      return Node::read(environment_);
+    } else {
+      auto &entry = std::get<detail::slot<Node, Environment>>(cache_.slots);
+      if (!entry.value)
+        entry.value.emplace(compute<Node>(typename Node::dependencies{}));
+      return std::as_const(*entry.value);
+    }
+  }
+
+private:
+  template <typename Node, typename... Dependencies>
+  constexpr auto compute(meta::type_list<Dependencies...>) {
+    // Recipes are pure functions of an immutable environment and their
+    // declared dependencies. A recipe cannot hide an undeclared get<T>().
+    return Node::compute(environment_, get<Dependencies>()...);
+  }
+
+  const Environment &environment_;
+  detail::cache<Environment, recipes> cache_{};
+};
+
+template <typename... Nodes, typename Environment>
+[[nodiscard]] constexpr auto evaluate(const Environment &environment) {
+  using roots = meta::type_list<Nodes...>;
+  evaluator<Environment, roots> graph{environment};
+
+  // Braced initialization is sequenced left-to-right. Shared dependencies
+  // therefore become cache hits for later roots in a suite.
+  return std::tuple<result_t<Nodes, Environment>...>{
+      graph.template get<Nodes>()...};
+}
+
+} // namespace Kito::graph
+
+// -----------------------------------------------------------------------------
+// Detector recipes
+// -----------------------------------------------------------------------------
+
+namespace Kito::recipes {
+
+struct h {
+  using dependencies = meta::type_list<>;
+  inline static constexpr bool is_source = true;
+
+  template <typename Frame>
+  [[nodiscard]] static constexpr decltype(auto)
+  read(Frame const &frame) noexcept {
+    return frame.h();
+  }
+};
+
+struct y {
+  using dependencies = meta::type_list<>;
+  inline static constexpr bool is_source = true;
+
+  template <typename Frame>
+  [[nodiscard]] static constexpr decltype(auto)
+  read(Frame const &frame) noexcept {
+    return frame.y();
+  }
+};
+
+struct tx {
+  using dependencies = meta::type_list<>;
+  inline static constexpr bool is_source = true;
+
+  template <typename Frame>
+  [[nodiscard]] static constexpr decltype(auto)
+  read(Frame const &frame) noexcept {
+    return frame.tx();
+  }
+};
+
+struct truth {
+  using dependencies = meta::type_list<>;
+  inline static constexpr bool is_source = true;
+
+  template <typename Frame>
+  [[nodiscard]] static constexpr decltype(auto)
+  read(Frame const &frame) noexcept {
+    return frame.truth();
+  }
+};
+
+struct noise_variance {
+  using dependencies = meta::type_list<>;
+  inline static constexpr bool is_source = true;
+
+  template <typename Frame>
+  [[nodiscard]] static constexpr auto read(Frame const &frame) noexcept
+      -> typename Frame::scalar_type {
+    return frame.noise_variance();
+  }
+};
+
+namespace detail {
+
+template <typename Frame>
+using model_t = typename std::remove_cvref_t<Frame>::model_type;
+
+template <typename Frame>
+using scalar_t = typename std::remove_cvref_t<Frame>::scalar_type;
+
+template <typename Frame>
+using vector_t = typename std::remove_cvref_t<Frame>::X_type;
+
+template <typename Frame>
+using square_matrix_t =
+    Eigen::Matrix<scalar_t<Frame>, static_cast<int>(model_t<Frame>::N),
+                  static_cast<int>(model_t<Frame>::N)>;
+
+template <typename Frame>
+using thin_q_t =
+    Eigen::Matrix<scalar_t<Frame>, static_cast<int>(model_t<Frame>::M),
+                  static_cast<int>(model_t<Frame>::N)>;
+
+template <typename Model>
+[[nodiscard]] auto nearest_symbol(typename Model::scalar_type value)
+    -> typename Model::scalar_type {
+  using scalar = typename Model::scalar_type;
+
+  auto best = static_cast<scalar>(Model::symbols.front());
+  auto best_distance = std::abs(value - best);
+  for (auto symbol : Model::symbols) {
+    const auto distance = std::abs(value - static_cast<scalar>(symbol));
+    if (distance < best_distance) {
+      best = static_cast<scalar>(symbol);
+      best_distance = distance;
+    }
+  }
+  return best;
+}
+
+template <typename Frame>
+[[nodiscard]] auto hard_slice(vector_t<Frame> const &soft) -> vector_t<Frame> {
+  using model = model_t<Frame>;
+
+  vector_t<Frame> result;
+  for (Eigen::Index index = 0; index < result.size(); ++index)
+    result[index] = nearest_symbol<model>(soft[index]);
+  return result;
+}
+
+} // namespace detail
+
+template <typename Frame> struct thin_qr {
+  using Q_type = detail::thin_q_t<Frame>;
+  using R_type = detail::square_matrix_t<Frame>;
+
+  Q_type q;
+  R_type r;
+};
+
+struct qr_h {
+  using dependencies = meta::type_list<h>;
+
+  template <typename Frame> using result = thin_qr<Frame>;
+
+  template <typename Frame>
+  [[nodiscard]] static auto
+  compute(Frame const &, typename Frame::H_type const &matrix)
+      -> result<Frame> {
+    using model = detail::model_t<Frame>;
+    using Q_type = typename result<Frame>::Q_type;
+
+    static_assert(model::M >= model::N,
+                  "Kito::recipes::qr_h requires Rx >= Tx");
+
+    Eigen::HouseholderQR<typename Frame::H_type> decomposition{matrix};
+    result<Frame> factor;
+
+    // Materialize the thin Q: no HouseholderSequence or other Eigen view is
+    // allowed to escape this recipe.
+    factor.q.noalias() = decomposition.householderQ() * Q_type::Identity();
+    factor.r = decomposition.matrixQR()
+                   .template topLeftCorner<static_cast<int>(model::N),
+                                           static_cast<int>(model::N)>()
+                   .template triangularView<Eigen::Upper>();
+    return factor;
+  }
+};
+
+struct qty {
+  using dependencies = meta::type_list<qr_h, y>;
+
+  template <typename Frame> using result = detail::vector_t<Frame>;
+
+  template <typename Frame>
+  [[nodiscard]] static auto
+  compute(Frame const &, thin_qr<Frame> const &factor,
+          typename Frame::Y_type const &observation) -> result<Frame> {
+    result<Frame> projected;
+    projected.noalias() = factor.q.transpose() * observation;
+    return projected;
+  }
+};
+
+struct gram {
+  using dependencies = meta::type_list<h>;
+
+  template <typename Frame> using result = detail::square_matrix_t<Frame>;
+
+  template <typename Frame>
+  [[nodiscard]] static auto
+  compute(Frame const &, typename Frame::H_type const &matrix)
+      -> result<Frame> {
+    result<Frame> product;
+    product.noalias() = matrix.transpose() * matrix;
+    return product;
+  }
+};
+
+struct matched {
+  using dependencies = meta::type_list<h, y>;
+
+  template <typename Frame> using result = detail::vector_t<Frame>;
+
+  template <typename Frame>
+  [[nodiscard]] static auto
+  compute(Frame const &, typename Frame::H_type const &matrix,
+          typename Frame::Y_type const &observation) -> result<Frame> {
+    result<Frame> product;
+    product.noalias() = matrix.transpose() * observation;
+    return product;
+  }
+};
+
+template <typename Frame> struct mmse_output {
+  using vector_type = detail::vector_t<Frame>;
+  using scalar_type = typename Frame::scalar_type;
+
+  vector_type symbols;
+  vector_type gain;
+  vector_type effective_variance;
+
+  [[nodiscard]] auto operator[](Eigen::Index index) const noexcept
+      -> scalar_type {
+    return symbols[index];
+  }
+};
+
+struct mmse : detector_recipe {
+  inline static constexpr bool is_detector = true;
+  inline static constexpr std::string_view name = "MMSE";
+  using dependencies = meta::type_list<gram, matched, noise_variance>;
+
+  template <typename Frame> using result = mmse_output<Frame>;
+
+  template <typename Frame>
+  [[nodiscard]] static auto
+  compute(Frame const &, gram::result<Frame> const &normal,
+          matched::result<Frame> const &rhs,
+          typename Frame::scalar_type variance) -> result<Frame> {
+    using scalar = typename Frame::scalar_type;
+
+    if (!(variance > scalar{0}) || !std::isfinite(variance))
+      throw std::invalid_argument{
+          "Kito::recipes::mmse requires a positive finite noise variance"};
+
+    auto regularized = normal;
+    regularized.diagonal().array() += variance;
+
+    Eigen::LDLT<gram::result<Frame>> factorization{regularized};
+    if (factorization.info() != Eigen::Success)
+      throw std::runtime_error{"Kito::recipes::mmse factorization failed"};
+
+    using matrix = gram::result<Frame>;
+    using vector = detail::vector_t<Frame>;
+
+    const matrix inverse = factorization.solve(matrix::Identity());
+    const vector raw_estimate = factorization.solve(rhs);
+    if (factorization.info() != Eigen::Success || !inverse.allFinite() ||
+        !raw_estimate.allFinite())
+      throw std::runtime_error{"Kito::recipes::mmse solve failed"};
+
+    // Studer-style soft-output sufficient statistics. `response` is W*H and
+    // `noise_projection` is W*W^T for W=(H^T H+Nv I)^-1 H^T.
+    const matrix response = inverse * normal;
+    const matrix noise_projection = inverse * normal * inverse;
+
+    result<Frame> output;
+    constexpr auto epsilon = std::numeric_limits<scalar>::epsilon();
+    const auto minimum_gain = std::sqrt(epsilon);
+    for (Eigen::Index stream = 0; stream < output.symbols.size(); ++stream) {
+      const auto gain = response(stream, stream);
+      output.gain[stream] = gain;
+      if (std::abs(gain) <= minimum_gain) {
+        // No observable gain means erasure, not infinite confidence.
+        output.symbols[stream] = scalar{0};
+        output.effective_variance[stream] =
+            std::numeric_limits<scalar>::max();
+        continue;
+      }
+
+      const auto interference =
+          std::max(response.row(stream).squaredNorm() - gain * gain,
+                   scalar{0});
+      const auto noise_amplification =
+          std::max(noise_projection(stream, stream), scalar{0});
+
+      output.symbols[stream] = raw_estimate[stream] / gain;
+      output.effective_variance[stream] = std::max(
+          (interference + variance * noise_amplification) /
+              (gain * gain),
+          epsilon);
+    }
+
+    if (!output.symbols.allFinite() || !output.effective_variance.allFinite())
+      throw std::runtime_error{"Kito::recipes::mmse soft output is not finite"};
+    return output;
+  }
+};
+
+template <std::size_t K> struct kbest : detector_recipe {
+  static_assert(K > 0, "Kito::recipes::kbest<K> requires K > 0");
+
+  inline static constexpr bool is_detector = true;
+  inline static constexpr std::string_view name = "K-Best";
+  using dependencies = meta::type_list<qr_h, qty>;
+
+  template <typename Frame> using result = detail::vector_t<Frame>;
+
+  template <typename Frame>
+  [[nodiscard]] static auto
+  compute(Frame const &, thin_qr<Frame> const &factor,
+          qty::result<Frame> const &projected) -> result<Frame> {
+    using model = detail::model_t<Frame>;
+    using scalar = typename Frame::scalar_type;
+    using vector = result<Frame>;
+
+    struct path {
+      vector symbols = vector::Zero();
+      scalar metric = scalar{0};
+    };
+
+    std::vector<path> survivors(1);
+    for (Eigen::Index layer = static_cast<Eigen::Index>(model::N); layer-- > 0;) {
+      std::vector<path> candidates;
+      candidates.reserve(survivors.size() * model::symbols.size());
+
+      for (auto const &survivor : survivors) {
+        scalar interference = scalar{0};
+        for (Eigen::Index column = layer + 1;
+             column < static_cast<Eigen::Index>(model::N); ++column) {
+          interference += factor.r(layer, column) * survivor.symbols[column];
+        }
+
+        for (auto raw_symbol : model::symbols) {
+          auto candidate = survivor;
+          const auto symbol = static_cast<scalar>(raw_symbol);
+          candidate.symbols[layer] = symbol;
+          const auto residual = projected[layer] - interference -
+                                factor.r(layer, layer) * symbol;
+          candidate.metric += residual * residual;
+          candidates.push_back(std::move(candidate));
+        }
+      }
+
+      std::ranges::sort(candidates, {}, &path::metric);
+      if (candidates.size() > K)
+        candidates.resize(K);
+      survivors = std::move(candidates);
+    }
+
+    if (survivors.empty())
+      throw std::runtime_error{"Kito::recipes::kbest produced no candidates"};
+    return survivors.front().symbols;
+  }
+};
+
+template <std::size_t Iterations, float Damping> struct ep : detector_recipe {
+  static_assert(Iterations > 0,
+                "Kito::recipes::ep requires at least one iteration");
+  static_assert(Damping > 0.0F && Damping <= 1.0F,
+                "Kito::recipes::ep damping must be in (0, 1]");
+
+  inline static constexpr bool is_detector = true;
+  inline static constexpr std::string_view name = "EP";
+  using dependencies = meta::type_list<gram, matched, noise_variance>;
+
+  template <typename Frame> using result = detail::vector_t<Frame>;
+
+  template <typename Frame>
+  [[nodiscard]] static auto
+  compute(Frame const &, gram::result<Frame> const &normal,
+          matched::result<Frame> const &rhs,
+          typename Frame::scalar_type variance) -> result<Frame> {
+    using model = detail::model_t<Frame>;
+    using scalar = typename Frame::scalar_type;
+    using matrix = gram::result<Frame>;
+    using vector = result<Frame>;
+
+    if (!(variance > scalar{0}) || !std::isfinite(variance))
+      throw std::invalid_argument{
+          "Kito::recipes::ep requires a positive finite noise variance"};
+
+    constexpr auto floor = static_cast<scalar>(5e-7);
+    constexpr auto damping = static_cast<scalar>(Damping);
+
+    // noise_variance is the complex variance; each real-extended component
+    // has covariance Nv/2.
+    const matrix likelihood_precision = scalar{2} * normal / variance;
+    const vector likelihood_mean = scalar{2} * rhs / variance;
+    vector alpha = vector::Constant(scalar{2});
+    vector gamma = vector::Zero();
+    vector posterior_mean = vector::Zero();
+
+    for (std::size_t iteration = 0; iteration < Iterations; ++iteration) {
+      matrix precision = likelihood_precision;
+      precision.diagonal() += alpha;
+
+      Eigen::LDLT<matrix> factorization{precision};
+      if (factorization.info() != Eigen::Success)
+        throw std::runtime_error{"Kito::recipes::ep factorization failed"};
+
+      const matrix covariance = factorization.solve(matrix::Identity());
+      posterior_mean.noalias() =
+          covariance * (likelihood_mean + gamma);
+      if (!posterior_mean.allFinite())
+        throw std::runtime_error{"Kito::recipes::ep posterior is not finite"};
+
+      auto target_alpha = alpha;
+      auto target_gamma = gamma;
+      for (Eigen::Index index = 0;
+           index < static_cast<Eigen::Index>(model::N); ++index) {
+        const auto marginal_variance =
+            std::max(covariance(index, index), floor);
+        const auto cavity_denominator =
+            scalar{1} - marginal_variance * alpha[index];
+        const auto cavity_variance =
+            cavity_denominator > floor
+                ? std::max(marginal_variance / cavity_denominator, floor)
+                : floor;
+        const auto cavity_mean =
+            cavity_variance *
+            (posterior_mean[index] / marginal_variance - gamma[index]);
+
+        std::array<scalar, model::symbols.size()> log_weights{};
+        auto largest_log_weight = -std::numeric_limits<scalar>::infinity();
+        for (std::size_t symbol_index = 0;
+             symbol_index < model::symbols.size(); ++symbol_index) {
+          const auto symbol =
+              static_cast<scalar>(model::symbols[symbol_index]);
+          const auto delta = symbol - cavity_mean;
+          log_weights[symbol_index] =
+              -(delta * delta) / (scalar{2} * cavity_variance);
+          largest_log_weight =
+              std::max(largest_log_weight, log_weights[symbol_index]);
+        }
+
+        scalar weight_sum = scalar{0};
+        scalar mean = scalar{0};
+        scalar second_moment = scalar{0};
+        for (std::size_t symbol_index = 0;
+             symbol_index < model::symbols.size(); ++symbol_index) {
+          const auto symbol =
+              static_cast<scalar>(model::symbols[symbol_index]);
+          const auto weight =
+              std::exp(log_weights[symbol_index] - largest_log_weight);
+          weight_sum += weight;
+          mean += weight * symbol;
+          second_moment += weight * symbol * symbol;
+        }
+
+        mean /= weight_sum;
+        const auto symbol_variance =
+            std::max(second_moment / weight_sum - mean * mean, floor);
+        const auto candidate_alpha =
+            scalar{1} / symbol_variance - scalar{1} / cavity_variance;
+        const auto candidate_gamma =
+            mean / symbol_variance - cavity_mean / cavity_variance;
+
+        if (candidate_alpha > floor && std::isfinite(candidate_alpha) &&
+            std::isfinite(candidate_gamma)) {
+          target_alpha[index] = candidate_alpha;
+          target_gamma[index] = candidate_gamma;
+        }
+      }
+
+      alpha = damping * target_alpha + (scalar{1} - damping) * alpha;
+      gamma = damping * target_gamma + (scalar{1} - damping) * gamma;
+    }
+
+    matrix final_precision = likelihood_precision;
+    final_precision.diagonal() += alpha;
+    Eigen::LDLT<matrix> final_factorization{final_precision};
+    if (final_factorization.info() != Eigen::Success)
+      throw std::runtime_error{
+          "Kito::recipes::ep final factorization failed"};
+    posterior_mean = final_factorization.solve(likelihood_mean + gamma);
+    if (final_factorization.info() != Eigen::Success ||
+        !posterior_mean.allFinite())
+      throw std::runtime_error{"Kito::recipes::ep final solve failed"};
+
+    return detail::hard_slice<Frame>(posterior_mean);
+  }
+};
+
+struct sphere : detector_recipe {
+  inline static constexpr bool is_detector = true;
+  inline static constexpr std::string_view name = "Sphere";
+  using dependencies = meta::type_list<qr_h, qty>;
+
+  template <typename Frame> using result = detail::vector_t<Frame>;
+
+  template <typename Frame>
+  [[nodiscard]] static auto
+  compute(Frame const &, thin_qr<Frame> const &factor,
+          qty::result<Frame> const &projected) -> result<Frame> {
+    using model = detail::model_t<Frame>;
+    using scalar = typename Frame::scalar_type;
+    using vector = result<Frame>;
+
+    // Babai gives both a valid owning fallback and a finite initial sphere.
+    vector best = vector::Zero();
+    for (Eigen::Index layer = static_cast<Eigen::Index>(model::N); layer-- > 0;) {
+      scalar rhs = projected[layer];
+      for (Eigen::Index column = layer + 1;
+           column < static_cast<Eigen::Index>(model::N); ++column)
+        rhs -= factor.r(layer, column) * best[column];
+
+      const auto diagonal = factor.r(layer, layer);
+      const auto center = std::abs(diagonal) >
+                                  std::numeric_limits<scalar>::epsilon()
+                              ? rhs / diagonal
+                              : rhs;
+      best[layer] = detail::nearest_symbol<model>(center);
+    }
+
+    vector current = best;
+    const vector initial_residual = projected - factor.r * best;
+    auto best_metric = initial_residual.squaredNorm();
+    if (!std::isfinite(best_metric))
+      best_metric = std::numeric_limits<scalar>::infinity();
+
+    auto search = [&](this auto &&self, Eigen::Index layer,
+                      scalar partial_metric) -> void {
+      if (partial_metric >= best_metric)
+        return;
+      if (layer < 0) {
+        best_metric = partial_metric;
+        best = current;
+        return;
+      }
+
+      scalar interference = scalar{0};
+      for (Eigen::Index column = layer + 1;
+           column < static_cast<Eigen::Index>(model::N); ++column)
+        interference += factor.r(layer, column) * current[column];
+
+      for (auto raw_symbol : model::symbols) {
+        const auto symbol = static_cast<scalar>(raw_symbol);
+        const auto residual = projected[layer] - interference -
+                              factor.r(layer, layer) * symbol;
+        const auto metric = partial_metric + residual * residual;
+        if (metric <= best_metric) {
+          current[layer] = symbol;
+          self(layer - 1, metric);
+        }
+      }
+    };
+
+    search(static_cast<Eigen::Index>(model::N) - 1, scalar{0});
+    return best;
+  }
+};
+
+} // namespace Kito::recipes
+
+// -----------------------------------------------------------------------------
+// Codes and decoders
+// -----------------------------------------------------------------------------
+
+namespace Kito {
+
+template <typename Code, std::size_t E>
+concept code_for =
+    requires(Code const &code, const typename Code::message_type &message) {
+      { Code::information_bits } -> std::convertible_to<std::size_t>;
+      { Code::nominal_coded_bits } -> std::convertible_to<std::size_t>;
+      requires Code::information_bits > 0;
+      requires Code::nominal_coded_bits > 0;
+      requires std::same_as<typename Code::message_type,
+                            std::array<bool, Code::information_bits>>;
+      { code.template encode<E>(message) } ->
+          std::same_as<std::array<bool, E>>;
+    };
+
+template <typename Decoder, typename Code, std::size_t E>
+concept decoder_for =
+    code_for<Code, E> &&
+    requires(Decoder &decoder, Code const &code,
+             const std::array<double, E> &soft_bits) {
+      requires Decoder::is_decoder;
+      { decoder.template decode<E>(code, soft_bits) } ->
+          std::same_as<typename Code::message_type>;
+    };
+
+struct hard_decision;
+template <std::size_t Iterations> struct layered_min_sum;
+
+template <std::size_t K> struct uncoded {
+  static_assert(K > 0, "Kito::uncoded<K>: K must be greater than zero");
+
+  inline static constexpr std::size_t information_bits = K;
+  inline static constexpr std::size_t nominal_coded_bits = K;
+  using message_type = std::array<bool, K>;
+  using default_decoder = hard_decision;
+
+  template <std::size_t E>
+    requires(E >= K)
+  [[nodiscard]] constexpr auto encode(const message_type &message) const
+      -> std::array<bool, E> {
+    std::array<bool, E> encoded{};
+    for (std::size_t bit = 0; bit < K; ++bit)
+      encoded[bit] = message[bit];
+    return encoded;
+  }
+};
+
+struct hard_decision {
+  inline static constexpr bool is_decoder = true;
+
+  template <std::size_t E, std::size_t K>
+    requires(E >= K)
+  [[nodiscard]] constexpr auto
+  decode(uncoded<K> const &, const std::array<double, E> &soft_bits) const
+      -> typename uncoded<K>::message_type {
+    typename uncoded<K>::message_type message{};
+    for (std::size_t bit = 0; bit < K; ++bit)
+      message[bit] = soft_bits[bit] <= 0.0;
+    return message;
+  }
+};
+
+template <std::size_t K, double Rate> class ldpc {
+  static_assert(K > 0, "Kito::ldpc<K, Rate>: K must be greater than zero");
+  static_assert(Rate > 0.0 && Rate <= 1.0,
+                "Kito::ldpc<K, Rate>: Rate must be in (0, 1]");
+
+  [[nodiscard]] static consteval auto nominal_length() -> std::size_t {
+    const double exact = static_cast<double>(K) / Rate;
+    const auto truncated = static_cast<std::size_t>(exact);
+    return truncated + (static_cast<double>(truncated) < exact ? 1 : 0);
+  }
+
+public:
+  using engine_type = detail::nr_ldpc<K, Rate>;
+  using message_type = std::array<bool, K>;
+  using default_decoder = layered_min_sum<10>;
+
+  inline static constexpr std::size_t information_bits = K;
+  inline static constexpr std::size_t nominal_coded_bits = nominal_length();
+  inline static constexpr std::size_t mother_coded_bits = engine_type::mN;
+
+  template <std::size_t E>
+  [[nodiscard]] auto encode(const message_type &message) const
+      -> std::array<bool, E> {
+    engine_type encoder;
+    encoder.encode(message);
+
+    std::array<bool, E> encoded{};
+    encoder.rateMatch(encoded);
+    return encoded;
+  }
+
+  // Neutral decoder customization point. The code owns rate recovery and
+  // message extraction; a decoder policy owns the actual graph schedule.
+  template <std::size_t E, typename Algorithm>
+  [[nodiscard]] auto
+  decode_with(const std::array<double, E> &soft_bits,
+              Algorithm &&algorithm) const -> message_type {
+    engine_type decoder;
+    decoder.rateRecover(soft_bits);
+    const auto &decoded =
+        std::forward<Algorithm>(algorithm)(decoder);
+
+    message_type message{};
+    for (std::size_t bit = 0; bit < K; ++bit)
+      message[bit] = static_cast<bool>(decoded[bit]);
+    return message;
+  }
+};
+
+template <std::size_t Iterations> struct layered_min_sum {
+  static_assert(Iterations > 0,
+                "Kito::layered_min_sum<Iterations>: Iterations must be greater "
+                "than zero");
+
+  inline static constexpr bool is_decoder = true;
+
+  template <std::size_t E, std::size_t K, double Rate>
+  [[nodiscard]] auto decode(ldpc<K, Rate> const &code,
+                            const std::array<double, E> &soft_bits) const
+      -> typename ldpc<K, Rate>::message_type {
+    return code.template decode_with<E>(soft_bits, [](auto &engine)
+                                             -> decltype(auto) {
+      return engine.decode(static_cast<unsigned>(Iterations));
+    });
+  }
+};
+
+} // namespace Kito
+
+// -----------------------------------------------------------------------------
+// Observation-only air boundary
+// -----------------------------------------------------------------------------
+
+namespace Kito {
+
+// The receiver-facing half of a simulated frame.  It deliberately has no
+// tx()/truth() API: detector, transfer and joint factor-graph policies cannot
+// accidentally become oracle receivers.
+template <typename Model> class observation {
+public:
+  using model_type = Model;
+  using scalar_type = typename model_type::scalar_type;
+  using H_type = typename model_type::H_type;
+  using X_type = typename model_type::X_type;
+  using Y_type = typename model_type::Y_type;
+  using h_type = H_type;
+  using x_type = X_type;
+  using y_type = Y_type;
+
+  template <typename Frame>
+    requires std::same_as<typename Frame::model_type, model_type>
+  explicit observation(Frame const &labeled)
+      : h_{labeled.h()}, y_{labeled.y()},
+        noise_variance_{labeled.noise_variance()} {}
+
+  [[nodiscard]] auto h(this observation const &self) noexcept
+      -> H_type const & {
+    return self.h_;
+  }
+
+  auto h(this observation &&) -> H_type const & = delete;
+  auto h(this observation const &&) -> H_type const & = delete;
+
+  [[nodiscard]] auto y(this observation const &self) noexcept
+      -> Y_type const & {
+    return self.y_;
+  }
+
+  auto y(this observation &&) -> Y_type const & = delete;
+  auto y(this observation const &&) -> Y_type const & = delete;
+
+  [[nodiscard]] auto noise_variance(this observation const &self) noexcept
+      -> scalar_type {
+    return self.noise_variance_;
+  }
+
+private:
+  H_type h_;
+  Y_type y_;
+  scalar_type noise_variance_;
+};
+
+// An owning, observation-only transmission.  The clear codeword exists only
+// while this object is constructed; it is never retained or exposed.
+template <typename System, std::size_t E> class air_word {
+public:
+  using system_type = System;
+  using model_type = typename system_type::model_type;
+  using observation_type = observation<model_type>;
+
+  inline static constexpr std::size_t bits_per_block =
+      model_type::bits_per_frame;
+  inline static constexpr std::size_t block_count = E / bits_per_block;
+
+  static_assert(E > 0, "Kito::air_word needs at least one air bit");
+  static_assert(E % bits_per_block == 0,
+                "an air word must contain complete MIMO blocks");
+
+  air_word(System &system, std::array<bool, E> const &encoded,
+           literals::snr_db snr) {
+    blocks_.reserve(block_count);
+    for (std::size_t offset = 0; offset < E; offset += bits_per_block) {
+      auto channel = system.draw();
+      auto labeled = channel.transmit(
+          std::span<bool const>(encoded.data() + offset, bits_per_block), snr);
+      blocks_.emplace_back(labeled);
+    }
+  }
+
+  [[nodiscard]] constexpr auto size(this air_word const &) noexcept
+      -> std::size_t {
+    return block_count;
+  }
+
+  [[nodiscard]] auto operator[](this air_word const &self,
+                                std::size_t index) noexcept
+      -> observation_type const & {
+    return self.blocks_[index];
+  }
+
+  auto operator[](this air_word &&, std::size_t)
+      -> observation_type const & = delete;
+  auto operator[](this air_word const &&, std::size_t)
+      -> observation_type const & = delete;
+
+private:
+  std::vector<observation_type> blocks_;
+};
+
+} // namespace Kito
+
+// -----------------------------------------------------------------------------
+// Receiver composition
+// -----------------------------------------------------------------------------
+
+namespace Kito {
+
+template <typename Policy>
+concept detector_policy = std::derived_from<Policy, detector_recipe> &&
+                          std::is_empty_v<Policy> &&
+                          std::default_initializable<Policy> && requires {
+  requires static_cast<bool>(Policy::is_detector);
+  typename Policy::dependencies;
+};
+
+template <typename Policy, typename Frame>
+concept detector_for = detector_policy<Policy> && graph::recipe_for<Policy, Frame>;
+
+template <typename Policy>
+concept transfer_policy = requires {
+  requires static_cast<bool>(Policy::is_transfer);
+};
+
+template <typename Policy>
+concept decoder_policy = requires {
+  requires static_cast<bool>(Policy::is_decoder);
+};
+
+template <typename Transfer, typename Frame, typename Estimate>
+concept transfer_for =
+    transfer_policy<Transfer> &&
+    requires(Transfer const &transfer, Frame const &frame,
+             Estimate const &estimate) {
+      { transfer(frame, estimate) } ->
+          std::same_as<
+              std::array<double, Frame::model_type::bits_per_frame>>;
+    };
+
+namespace detail {
+
+template <typename Frame, typename Estimate, typename Variance>
+[[nodiscard]] auto demap_max_log(const Frame &frame, const Estimate &estimate,
+                                 Variance variance_for)
+    -> std::array<double, Frame::model_type::bits_per_frame> {
+  using model = typename Frame::model_type;
+  using scalar = typename model::scalar_type;
+
+  static_assert(requires(std::size_t i) {
+    { estimate[static_cast<Eigen::Index>(i)] } -> std::convertible_to<scalar>;
+  });
+
+  std::array<double, model::bits_per_frame> llr{};
+  for (std::size_t dimension = 0; dimension < model::tx_dimensions;
+       ++dimension) {
+    const auto value =
+        static_cast<double>(estimate[static_cast<Eigen::Index>(dimension)]);
+    const auto variance = std::max(
+        static_cast<double>(variance_for(dimension)),
+        static_cast<double>(std::numeric_limits<scalar>::epsilon()));
+
+    for (std::size_t bit = 0; bit < model::bits_per_axis; ++bit) {
+      auto distance_zero = std::numeric_limits<double>::infinity();
+      auto distance_one = std::numeric_limits<double>::infinity();
+      const auto shift = model::bits_per_axis - 1 - bit;
+
+      for (std::size_t symbol = 0; symbol < model::symbols.size(); ++symbol) {
+        const auto delta = value - static_cast<double>(model::symbols[symbol]);
+        const auto distance = delta * delta;
+        if (((symbol >> shift) & 1U) == 0U)
+          distance_zero = std::min(distance_zero, distance);
+        else
+          distance_one = std::min(distance_one, distance);
+      }
+
+      // Positive means bit 0, matching the LDPC decoder convention.
+      llr[dimension * model::bits_per_axis + bit] =
+          (distance_one - distance_zero) / variance;
+    }
+  }
+  return llr;
+}
+
+} // namespace detail
+
+// Generic max-log symbol-to-bit transfer. It deliberately consumes only a
+// symbol estimate and the immutable frame; algorithms with richer sufficient
+// statistics can provide a different transfer policy without changing the
+// receiver or performance runner.
+struct max_log_llr {
+  inline static constexpr bool is_transfer = true;
+
+  template <typename Frame, typename Estimate>
+  [[nodiscard]] auto operator()(const Frame &frame,
+                                const Estimate &estimate) const {
+    return detail::demap_max_log(
+        frame, estimate,
+        [&](std::size_t) { return frame.noise_variance(); });
+  }
+};
+
+// Consumes the per-stream effective variance produced by recipes::mmse. The
+// transfer is independent from both the detector recipe and decoder policy;
+// other papers/approximations can be expressed as another tiny policy.
+struct studer_mmse_llr {
+  inline static constexpr bool is_transfer = true;
+
+  template <typename Frame, typename Estimate>
+    requires requires(Estimate const &estimate, Eigen::Index i) {
+      estimate.symbols[i];
+      estimate.effective_variance[i];
+    }
+  [[nodiscard]] auto operator()(const Frame &frame,
+                                const Estimate &estimate) const {
+    return detail::demap_max_log(
+        frame, estimate.symbols, [&](std::size_t dimension) {
+          return estimate.effective_variance[
+              static_cast<Eigen::Index>(dimension)];
+        });
+  }
+};
+
+template <detector_policy Detector, transfer_policy Transfer>
+struct receiver_frontend {
+  [[no_unique_address]] Detector detector{};
+  [[no_unique_address]] Transfer transfer{};
+};
+
+template <detector_policy Detector, transfer_policy Transfer,
+          decoder_policy Decoder>
+struct separated_receiver {
+  inline static constexpr bool is_receiver = true;
+
+  [[no_unique_address]] Detector detector{};
+  [[no_unique_address]] Transfer transfer{};
+  [[no_unique_address]] Decoder decoder{};
+
+  template <std::size_t E, typename System, typename Code>
+    requires code_for<Code, E> && decoder_for<Decoder, Code, E> &&
+             detector_for<
+                 Detector, typename air_word<System, E>::observation_type> &&
+             transfer_for<
+                 Transfer, typename air_word<System, E>::observation_type,
+                 graph::result_t<
+                     Detector,
+                     typename air_word<System, E>::observation_type>>
+  [[nodiscard]] auto receive(Code const &code, air_word<System, E> const &air)
+      -> typename Code::message_type {
+    using model = typename System::model_type;
+    constexpr auto block_bits = model::bits_per_frame;
+    static_assert(E % block_bits == 0,
+                  "air codeword must contain complete MIMO symbol blocks");
+
+    std::array<double, E> soft_bits{};
+    for (std::size_t block = 0; block < air.size(); ++block) {
+      auto const &view = air[block];
+      auto detected = graph::evaluate<Detector>(view);
+      const auto block_soft = transfer(view, std::get<0>(detected));
+      const auto offset = block * block_bits;
+      std::ranges::copy(block_soft, soft_bits.begin() + offset);
+    }
+
+    return decoder.template decode<E>(code, soft_bits);
+  }
+};
+
+template <detector_policy Detector, transfer_policy Transfer>
+[[nodiscard]] constexpr auto operator>>(Detector detector, Transfer transfer) {
+  return receiver_frontend<Detector, Transfer>{std::move(detector),
+                                               std::move(transfer)};
+}
+
+template <detector_policy Detector, transfer_policy Transfer,
+          decoder_policy Decoder>
+[[nodiscard]] constexpr auto
+operator>>(receiver_frontend<Detector, Transfer> frontend, Decoder decoder) {
+  return separated_receiver<Detector, Transfer, Decoder>{
+      std::move(frontend.detector), std::move(frontend.transfer),
+      std::move(decoder)};
+}
+
+template <typename Receiver, typename System, typename Code, std::size_t E>
+concept receiver_for =
+    code_for<Code, E> &&
+    requires(Receiver &receiver, Code const &code,
+             air_word<System, E> const &air) {
+      { receiver.template receive<E>(code, air) } ->
+          std::same_as<typename Code::message_type>;
+    };
+
+} // namespace Kito
+
+// -----------------------------------------------------------------------------
+// Performance runner
+// -----------------------------------------------------------------------------
+
+namespace Kito::literals {
+
+struct frame_limit {
+  std::size_t value;
+};
+
+struct error_limit {
+  std::size_t value;
+};
+
+[[nodiscard]] consteval auto operator""_frames(unsigned long long value)
+    -> frame_limit {
+  return {static_cast<std::size_t>(value)};
+}
+
+[[nodiscard]] consteval auto operator""_errors(unsigned long long value)
+    -> error_limit {
+  return {static_cast<std::size_t>(value)};
+}
+
+[[nodiscard]] consteval auto operator""_f(unsigned long long value)
+    -> frame_limit {
+  return {static_cast<std::size_t>(value)};
+}
+
+[[nodiscard]] consteval auto operator""_e(unsigned long long value)
+    -> error_limit {
+  return {static_cast<std::size_t>(value)};
+}
+
+} // namespace Kito::literals
+
+namespace Kito {
+
+struct performance_point {
+  double snr_db{};
+  std::size_t frames{};
+  std::size_t frame_errors{};
+  std::size_t bit_errors{};
+  double ber{};
+  double fer{};
+};
+
+using performance_curve = std::vector<performance_point>;
+
+namespace detail {
+
+[[nodiscard]] consteval auto round_up(std::size_t value,
+                                      std::size_t alignment) -> std::size_t {
+  if (alignment == 0)
+    throw "Kito::round_up: zero alignment";
+  const auto blocks = value / alignment + (value % alignment != 0);
+  if (blocks > std::numeric_limits<std::size_t>::max() / alignment)
+    throw "Kito::round_up: result is not representable";
+  return blocks * alignment;
+}
+
+template <typename Code, typename Model>
+inline constexpr std::size_t air_bits_v =
+    round_up(static_cast<std::size_t>(Code::nominal_coded_bits),
+             static_cast<std::size_t>(Model::bits_per_frame));
+
+} // namespace detail
+
+template <typename System, typename Code, typename Receiver>
+class performance {
+public:
+  using system_type = System;
+  using model_type = typename System::model_type;
+  using code_type = Code;
+  using receiver_type = Receiver;
+  inline static constexpr std::size_t air_bits =
+      detail::air_bits_v<code_type, model_type>;
+
+  static_assert(air_bits > 0);
+  static_assert(code_for<code_type, air_bits>);
+  static_assert(receiver_for<receiver_type, system_type, code_type, air_bits>);
+
+  constexpr performance(System system, Code code, Receiver receiver)
+      : system_{std::move(system)}, code_{std::move(code)},
+        receiver_{std::move(receiver)} {}
+
+  template <typename Self>
+    requires(!std::is_const_v<std::remove_reference_t<Self>>)
+  [[nodiscard]] constexpr decltype(auto)
+  sweep(this Self &&self, literals::snr_db first, literals::snr_db last,
+        literals::snr_db step) {
+    if (!std::isfinite(first.value) || !std::isfinite(last.value) ||
+        !std::isfinite(step.value) || !(step.value > 0.0) ||
+        last.value < first.value)
+      throw std::invalid_argument{
+          "performance::sweep expects finite SNRs, first <= last, and a "
+          "positive step"};
+    self.first_snr_ = first;
+    self.last_snr_ = last;
+    self.snr_step_ = step;
+    return return_fluent(std::forward<Self>(self));
+  }
+
+  template <typename Self>
+    requires(!std::is_const_v<std::remove_reference_t<Self>>)
+  [[nodiscard]] constexpr decltype(auto)
+  until(this Self &&self, literals::error_limit errors) {
+    if (errors.value == 0)
+      throw std::invalid_argument{"performance::until needs errors > 0"};
+    self.max_error_frames_ = errors.value;
+    return return_fluent(std::forward<Self>(self));
+  }
+
+  template <typename Self>
+    requires(!std::is_const_v<std::remove_reference_t<Self>>)
+  [[nodiscard]] constexpr decltype(auto)
+  until(this Self &&self, literals::error_limit errors,
+        literals::frame_limit frames) {
+    if (errors.value == 0 || frames.value == 0)
+      throw std::invalid_argument{
+          "performance::until needs positive error and frame limits"};
+    self.max_error_frames_ = errors.value;
+    self.max_frames_ = frames.value;
+    return return_fluent(std::forward<Self>(self));
+  }
+
+  template <typename Self>
+    requires(!std::is_const_v<std::remove_reference_t<Self>>)
+  [[nodiscard]] auto run(this Self &&self) -> performance_curve {
+    performance_curve curve;
+
+    const auto span = static_cast<long double>(self.last_snr_.value) -
+                      static_cast<long double>(self.first_snr_.value);
+    const auto exact_points =
+        std::floor(span / static_cast<long double>(self.snr_step_.value) +
+                   1e-12L) +
+        1.0L;
+    if (!std::isfinite(exact_points) || exact_points < 1.0L ||
+        exact_points >
+            static_cast<long double>(std::numeric_limits<std::size_t>::max()))
+      throw std::length_error{"performance::sweep has too many SNR points"};
+    const auto points = static_cast<std::size_t>(exact_points);
+    curve.reserve(points);
+
+    for (std::size_t point = 0; point < points; ++point) {
+      const literals::snr_db snr{
+          self.first_snr_.value + self.snr_step_.value * point};
+      std::size_t frames = 0;
+      std::size_t frame_errors = 0;
+      std::size_t bit_errors = 0;
+
+      while (frames < self.max_frames_ &&
+             frame_errors < self.max_error_frames_) {
+        typename code_type::message_type message{};
+        std::ranges::generate(message, [] { return random_bit(); });
+
+        const auto encoded = self.code_.template encode<air_bits>(message);
+        const air_word<system_type, air_bits> air{self.system_, encoded, snr};
+        const auto decoded = self.receiver_.template receive<air_bits>(
+            self.code_, air);
+
+        std::size_t current_errors = 0;
+        for (std::size_t bit = 0; bit < code_type::information_bits; ++bit)
+          current_errors += message[bit] != decoded[bit];
+
+        bit_errors += current_errors;
+        frame_errors += current_errors != 0;
+        ++frames;
+      }
+
+      const auto compared_bits =
+          static_cast<double>(frames) * code_type::information_bits;
+      curve.push_back(performance_point{
+          .snr_db = snr.value,
+          .frames = frames,
+          .frame_errors = frame_errors,
+          .bit_errors = bit_errors,
+          .ber = frames == 0
+                     ? 0.0
+                     : static_cast<double>(bit_errors) / compared_bits,
+          .fer = frames == 0
+                     ? 0.0
+                     : static_cast<double>(frame_errors) /
+                           static_cast<double>(frames),
+      });
+    }
+
+    return curve;
+  }
+
+  template <typename Self>
+    requires(!std::is_const_v<std::remove_reference_t<Self>>)
+  [[nodiscard]] auto operator()(this Self &&self, literals::snr_db first,
+                                literals::snr_db last,
+                                literals::error_limit errors,
+                                literals::frame_limit frames = {100'000})
+      -> performance_curve {
+    return std::forward<Self>(self)
+        .sweep(first, last, literals::snr_db{1.0})
+        .until(errors, frames)
+        .run();
+  }
+
+  template <typename Self>
+    requires(!std::is_const_v<std::remove_reference_t<Self>>)
+  [[nodiscard]] auto operator()(this Self &&self, literals::snr_db first,
+                                literals::snr_db last,
+                                literals::snr_db step,
+                                literals::error_limit errors,
+                                literals::frame_limit frames = {100'000})
+      -> performance_curve {
+    return std::forward<Self>(self)
+        .sweep(first, last, step)
+        .until(errors, frames)
+        .run();
+  }
+
+  template <typename Self>
+    requires(!std::is_const_v<std::remove_reference_t<Self>>)
+  [[nodiscard]] auto operator()(this Self &&self, literals::snr_db snr,
+                                literals::error_limit errors,
+                                literals::frame_limit frames = {100'000})
+      -> performance_curve {
+    return std::forward<Self>(self)(snr, snr, errors, frames);
+  }
+
+private:
+  template <typename Self>
+  [[nodiscard]] static constexpr decltype(auto) return_fluent(Self &&self) {
+    if constexpr (std::is_lvalue_reference_v<Self &&>)
+      return (self);
+    else
+      return std::remove_cvref_t<Self>{std::forward<Self>(self)};
+  }
+
+  [[no_unique_address]] System system_;
+  [[no_unique_address]] Code code_;
+  [[no_unique_address]] Receiver receiver_;
+
+  literals::snr_db first_snr_{0.0};
+  literals::snr_db last_snr_{10.0};
+  literals::snr_db snr_step_{1.0};
+  std::size_t max_error_frames_{100};
+  std::size_t max_frames_{100'000};
+};
+
+template <typename System, typename Code, typename Receiver>
+performance(System, Code, Receiver) -> performance<System, Code, Receiver>;
+
+} // namespace Kito
+
+// -----------------------------------------------------------------------------
+// Terse façade: policies are values and an experiment is just S | C | R.
+// -----------------------------------------------------------------------------
+
+namespace Kito {
+
+using q16 = qam16<float>;
+using q64 = qam64<float>;
+using q256 = qam256<float>;
+
+template <literals::tx_count Tx, literals::rx_count Rx,
+          qam_modulation Modulation = q16>
+inline constexpr mimo<Tx, Rx, Modulation> m{};
+template <std::size_t K, double Rate>
+inline constexpr ldpc<K, Rate> c{};
+template <std::size_t K>
+inline constexpr uncoded<K> u{};
+
+inline constexpr recipes::mmse mmse{};
+template <std::size_t K>
+inline constexpr recipes::kbest<K> kbest{};
+template <std::size_t Iterations, float Damping = 0.7F>
+inline constexpr recipes::ep<Iterations, Damping> ep{};
+inline constexpr recipes::sphere sphere{};
+
+inline constexpr max_log_llr maxlog{};
+inline constexpr studer_mmse_llr studer{};
+inline constexpr hard_decision hard{};
+template <std::size_t Iterations>
+inline constexpr layered_min_sum<Iterations> minsum{};
+
+template <typename System, typename Code> struct experiment_head {
+  [[no_unique_address]] System system;
+  [[no_unique_address]] Code code;
+};
+
+template <typename System, typename Code>
+  requires requires {
+    typename System::model_type;
+    typename Code::message_type;
+    Code::information_bits;
+    Code::nominal_coded_bits;
+  }
+[[nodiscard]] constexpr auto operator|(System system, Code code) {
+  return experiment_head<System, Code>{std::move(system), std::move(code)};
+}
+
+template <typename System, typename Code, typename Receiver>
+  requires requires { Receiver::is_receiver; }
+[[nodiscard]] constexpr auto operator|(experiment_head<System, Code> head,
+                                       Receiver receiver) {
+  return performance{std::move(head.system), std::move(head.code),
+                     std::move(receiver)};
+}
+
+template <detector_policy Detector>
+[[nodiscard]] constexpr auto default_soft(Detector) {
+  if constexpr (std::same_as<Detector, recipes::mmse>)
+    return studer;
+  else
+    return maxlog;
+}
+
+template <typename System, typename Code, detector_policy Detector>
+  requires requires { typename Code::default_decoder; }
+[[nodiscard]] constexpr auto operator|(experiment_head<System, Code> head,
+                                       Detector detector) {
+  using decoder = typename Code::default_decoder;
+  return performance{std::move(head.system), std::move(head.code),
+                     detector >> default_soft(detector) >> decoder{}};
+}
+
+} // namespace Kito
+
+// -----------------------------------------------------------------------------
+// Shared detector suite
+// -----------------------------------------------------------------------------
+
+namespace Kito {
+
+template <detector_policy... Detectors> struct suite {
+  static_assert(sizeof...(Detectors) > 0,
+                "Kito::suite needs at least one detector");
+
+  constexpr explicit suite(Detectors...) noexcept {}
+};
+
+template <typename... Detectors>
+suite(Detectors...) -> suite<std::remove_cvref_t<Detectors>...>;
+
+struct detection_score {
+  std::string_view detector;
+  std::size_t bit_errors{};
+  std::size_t symbol_errors{};
+  bool frame_error{};
+  double ber{};
+  double ser{};
+  double fer{};
+};
+
+struct measure_t {};
+inline constexpr measure_t measure{};
+
+template <typename Model, typename Truth, typename DetectorList,
+          typename Results>
+class detection_batch;
+
+template <typename Model, typename Truth, typename... Detectors,
+          typename... Results>
+class detection_batch<Model, Truth, meta::type_list<Detectors...>,
+                      std::tuple<Results...>> {
+  static_assert(sizeof...(Detectors) == sizeof...(Results));
+
+public:
+  using model_type = Model;
+  using truth_type = Truth;
+  using detector_types = meta::type_list<Detectors...>;
+  using results_type = std::tuple<Results...>;
+
+  constexpr detection_batch(Truth truth, results_type results)
+      : truth_{std::move(truth)}, results_{std::move(results)} {}
+
+  template <std::size_t Index, typename Self>
+    requires std::is_lvalue_reference_v<Self &&>
+  [[nodiscard]] constexpr decltype(auto) get(this Self &&self) noexcept {
+    return std::get<Index>(std::forward_like<decltype(self)>(self.results_));
+  }
+
+  [[nodiscard]] auto scores(this detection_batch const &self) {
+    return std::apply(
+        [&]<typename... Estimates>(Estimates const &...estimates) {
+          return std::tuple{
+              score_one<Detectors>(self.truth_, estimates)...};
+        },
+        self.results_);
+  }
+
+private:
+  template <typename Detector, typename Estimate>
+  [[nodiscard]] static auto score_one(Truth const &truth,
+                                      Estimate const &estimate)
+      -> detection_score {
+    std::size_t bit_errors = 0;
+    std::size_t symbol_errors = 0;
+
+    for (std::size_t dimension = 0; dimension < Model::tx_dimensions;
+         ++dimension) {
+      const auto value = estimate[static_cast<Eigen::Index>(dimension)];
+      std::size_t nearest = 0;
+      auto distance = std::abs(value - Model::symbols.front());
+      for (std::size_t index = 1; index < Model::symbols.size(); ++index) {
+        const auto candidate = std::abs(value - Model::symbols[index]);
+        if (candidate < distance) {
+          distance = candidate;
+          nearest = index;
+        }
+      }
+
+      const auto expected =
+          truth[static_cast<Eigen::Index>(dimension)];
+      symbol_errors += nearest != expected;
+      bit_errors += std::popcount(nearest ^ expected);
+    }
+
+    constexpr auto total_bits = Model::bits_per_frame;
+    constexpr auto total_symbols = Model::tx_dimensions;
+    return detection_score{
+        .detector = Detector::name,
+        .bit_errors = bit_errors,
+        .symbol_errors = symbol_errors,
+        .frame_error = symbol_errors != 0,
+        .ber = static_cast<double>(bit_errors) / total_bits,
+        .ser = static_cast<double>(symbol_errors) / total_symbols,
+        .fer = symbol_errors != 0 ? 1.0 : 0.0,
+    };
+  }
+
+  Truth truth_;
+  results_type results_;
+};
+
+template <typename Frame, detector_policy... Detectors>
+  requires(detector_for<Detectors, Frame> && ...)
+[[nodiscard]] auto operator|(Frame const &frame, suite<Detectors...>) {
+  using model = typename Frame::model_type;
+  using truth = typename Frame::truth_type;
+  using detector_list = meta::type_list<Detectors...>;
+  auto results = graph::evaluate<Detectors...>(frame);
+  using batch = detection_batch<model, truth, detector_list,
+                                decltype(results)>;
+  return batch{frame.truth(), std::move(results)};
+}
+
+template <typename Model, typename Truth, typename DetectorList,
+          typename Results>
+[[nodiscard]] auto
+operator|(detection_batch<Model, Truth, DetectorList, Results> const &batch,
+          measure_t) {
+  return batch.scores();
+}
 
 } // namespace Kito
